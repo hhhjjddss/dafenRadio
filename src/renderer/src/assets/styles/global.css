@@ -1,0 +1,284 @@
+/* ============================================================
+   DAFEN MUSIC · 暖白唱片室主题
+   参考基调：奶油白 / 淡紫灰底色 / 玻璃浮层 / 封面提取色作为强调色
+   ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* === 底色层次 === */
+  --bg-abyss: #f2eef8;
+  --bg-deep: #f7f3fb;
+  --bg-primary: #fbf9ff;
+  --bg-secondary: #f3eef9;
+  --bg-elevated: #ffffff;
+  --bg-surface: rgba(78, 62, 112, 0.045);
+  --bg-hover: rgba(78, 62, 112, 0.08);
+  --bg-active: rgba(78, 62, 112, 0.13);
+
+  /* === 平台强调色：默认网易云红，data-platform="soda" 时切为汽水绿 === */
+  --platform-accent: #cf2e3f;
+  --platform-accent-deep: #a82132;
+  --platform-accent-bright: #e05263;
+
+  --amber: var(--platform-accent);
+  --amber-dim: var(--platform-accent-deep);
+  --amber-bright: var(--platform-accent-bright);
+  --amber-glow: color-mix(in srgb, var(--platform-accent) 22%, transparent);
+  --copper: #b96278;
+  --ruby: #c94f5c;
+  --rose: #d63d6c;
+  --rose-deep: #b02752;
+  --rose-soft: rgba(214, 61, 108, 0.1);
+  --rose-glow: rgba(214, 61, 108, 0.35);
+  --emerald: #3f9b78;
+  --emerald-dim: rgba(63, 155, 120, 0.12);
+
+  /* === 平台强调色（账户与平台区域） === */
+  --brand-accent: var(--platform-accent);
+  --brand-accent-deep: var(--platform-accent-deep);
+  --brand-accent-soft: color-mix(in srgb, var(--platform-accent) 9%, transparent);
+  --brand-accent-line: color-mix(in srgb, var(--platform-accent) 24%, transparent);
+  --brand-accent-glow: color-mix(in srgb, var(--platform-accent) 20%, transparent);
+
+  /* === 文字 === */
+  --text-cream: #2b2738;
+  --text-warm: #474156;
+  --text-primary: #2b2738;
+  --text-secondary: #5a5368;
+  --text-muted: #6f6880;
+  --text-ghost: #8a829b;
+
+  /* === 玻璃浮层 === */
+  --glass-bg: rgba(255, 255, 255, 0.62);
+  --glass-bg-hover: rgba(255, 255, 255, 0.86);
+  --glass-border: rgba(70, 55, 110, 0.12);
+  --glass-border-hover: rgba(70, 55, 110, 0.22);
+  --glass-shine: rgba(255, 255, 255, 0.7);
+
+  --amber-highlight: color-mix(in srgb, var(--platform-accent) 12%, transparent);
+  --amber-glass: color-mix(in srgb, var(--platform-accent) 9%, transparent);
+  --amber-border: color-mix(in srgb, var(--platform-accent) 28%, transparent);
+  --amber-focus: color-mix(in srgb, var(--platform-accent) 40%, transparent);
+  --amber-hover: color-mix(in srgb, var(--platform-accent) 16%, transparent);
+  --amber-glow-sm: color-mix(in srgb, var(--platform-accent) 14%, transparent);
+  --amber-glow-md: color-mix(in srgb, var(--platform-accent) 24%, transparent);
+  --amber-glow-lg: color-mix(in srgb, var(--platform-accent) 36%, transparent);
+  --amber-shadow: color-mix(in srgb, var(--platform-accent) 28%, transparent);
+
+  --border-warm: rgba(70, 55, 110, 0.12);
+  --border-subtle: rgba(70, 55, 110, 0.07);
+
+  --shadow-warm: 0 6px 28px rgba(70, 55, 110, 0.12);
+  --shadow-deep: 0 14px 48px rgba(70, 55, 110, 0.16);
+  --shadow-amber: 0 0 34px color-mix(in srgb, var(--platform-accent) 18%, transparent);
+  --shadow-glass: 0 8px 30px rgba(70, 55, 110, 0.12);
+  --shadow-glass-hover: 0 12px 40px rgba(70, 55, 110, 0.16);
+
+  --blur-glass: 22px;
+  --blur-heavy: 46px;
+
+  /* === 字体：Outfit 几何无衬线（拉丁）+ 系统中文回退 === */
+  --font-display: 'Outfit', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-body: 'Outfit', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 36px;
+  --space-2xl: 48px;
+
+  --r-sm: 8px;
+  --r-md: 14px;
+  --r-lg: 18px;
+  --r-xl: 24px;
+  --r-full: 9999px;
+
+  --t-fast: 0.16s cubic-bezier(0.4, 0, 0.2, 1);
+  --t-normal: 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+  --t-spring: 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 汽水音乐：绿色强调 */
+:root[data-platform='soda'] {
+  --platform-accent: #12a05a;
+  --platform-accent-deep: #0c7d46;
+  --platform-accent-bright: #17b26a;
+}
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font-body);
+  background: var(--bg-abyss);
+  color: var(--text-cream);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 沉浸播放模式 — 全部透明，透出桌面 */
+html.immersive-mode,
+html.immersive-mode body,
+html.immersive-mode #app {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+/* 托盘小面板：窗口本身透明，只保留卡片玻璃底 */
+html.tray-mode,
+html.tray-mode body,
+html.tray-mode #app {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+html.tray-mode body { user-select: none; -webkit-user-select: none; }
+html.lyric-mode,
+html.lyric-mode body,
+html.lyric-mode #app {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+html.lyric-mode body { user-select: none; -webkit-user-select: none; }
+html.immersive-mode #app::after {
+  display: none !important;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+/* 等宽工具类：必须全局，子组件里的时间码/倒计时/计数才能拿到 JetBrains Mono */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 禁止图片被拖出窗口（封面等） */
+img {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(70, 55, 110, 0.16);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(70, 55, 110, 0.28);
+}
+
+input, button, textarea {
+  font-family: inherit;
+  outline: none;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+::selection {
+  background: var(--amber);
+  color: #fff;
+}
+
+/* 通用液态玻璃 — 暖白主题版 */
+.glass {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-glass);
+  backdrop-filter: blur(var(--blur-glass));
+  -webkit-backdrop-filter: blur(var(--blur-glass));
+  position: relative;
+}
+
+.glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, var(--glass-shine) 0%, transparent 50%);
+  pointer-events: none;
+}
+
+.glass:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--glass-border-hover);
+  box-shadow: var(--shadow-glass-hover);
+}
+
+/* ---- 悬浮功能说明：data-tip="短文案"，默认在按钮下方，.tip-up 在上方 ---- */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 9px);
+  left: 50%;
+  z-index: 60;
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--shadow-glass);
+  color: var(--text-secondary);
+  font: 500 10.5px/1.3 var(--font-body);
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, -3px);
+  transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s;
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+  transition-delay: 0.12s;
+}
+[data-tip].tip-up::after {
+  top: auto;
+  bottom: calc(100% + var(--tip-gap, 9px));
+  transform: translate(-50%, 3px);
+}
+[data-tip].tip-up:hover::after,
+[data-tip].tip-up:focus-visible::after { transform: translate(-50%, 0); }
+
+/* 窗口最小化/隐藏到托盘、或切到其他应用时冻结常驻动画（唱片、呼吸点、跑马灯、封面漂移），回前台自动恢复 */
+html:is(.app-hidden, .app-inactive) *,
+html:is(.app-hidden, .app-inactive) *::before,
+html:is(.app-hidden, .app-inactive) *::after {
+  animation-play-state: paused !important;
+}
+
+/* 沉浸歌词页盖住主舞台时，底层动画同样停跑 */
+html.lyrics-veil .stage *,
+html.lyrics-veil .stage *::before,
+html.lyrics-veil .stage *::after {
+  animation-play-state: paused !important;
+}

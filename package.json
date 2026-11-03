@@ -1,0 +1,64 @@
+{
+  "name": "dafen-radio",
+  "version": "1.1.2",
+  "description": "DaFen Radio",
+  "main": "./out/main/index.js",
+  "author": "DaFen",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node scripts/electron-vite.cjs dev",
+    "build": "electron-vite build",
+    "preview": "node scripts/electron-vite.cjs preview",
+    "start": "node scripts/electron-vite.cjs preview",
+    "postinstall": "electron-builder install-app-deps",
+    "build:unpack": "npm run build && electron-builder --dir",
+    "build:win": "npm run build && electron-builder --win",
+    "build:all": "npm run build && electron-builder --dir --win"
+  },
+  "dependencies": {
+    "@electron-toolkit/utils": "^3.0.0",
+    "@lucide/vue": "^1.60.0",
+    "@neteasecloudmusicapienhanced/api": "4.41.1",
+    "gsap": "^3.15.0"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^1.0.1",
+    "@types/node": "^22.10.5",
+    "@vitejs/plugin-vue": "^5.2.3",
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^3.0.0",
+    "sharp": "^0.35.3",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vue": "^3.5.13",
+    "vue-tsc": "^2.2.0"
+  },
+  "build": {
+    "appId": "com.dafen.radio",
+    "productName": "DaFen Radio",
+    "directories": {
+      "output": "dafenRadio"
+    },
+    "files": [
+      "out/**/*",
+      "resources/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "resources/icon.ico",
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico",
+      "installerHeaderIcon": "resources/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "DaFen Radio",
+      "include": "build/installer.nsh"
+    }
+  }
+}

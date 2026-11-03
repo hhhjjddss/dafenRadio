@@ -1,0 +1,142 @@
+/* ============================================================
+   BootSplash 开屏启动页 样式
+   「落款」式构图：logo 符号 + 字标 + 一根自动画完的细线
+   一个材质、一条动线。组合整体一次进场；细线是唯一的进度指示。
+   结尾整体淡出，所有时序相对 --boot-dur，改时长不用改关键帧。
+
+   主题适配：把模板的 --accent / --fg / --bg 映射到本项目已有的
+   主题变量 --amber / --text-cream / --bg-deep，三种主题自动生效。
+   ============================================================ */
+
+.boot-splash {
+  --boot-dur: 5200ms;
+  --accent: var(--platform-accent, #cf2e3f);
+  --fg: #2b2738;
+  --bg: #fbf9ff;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    radial-gradient(
+      46% 34% at 50% 46%,
+      color-mix(in srgb, var(--accent) 6%, transparent) 0%,
+      transparent 72%
+    ),
+    var(--bg);
+  cursor: default;
+  user-select: none;
+  animation: bootExit var(--boot-dur) cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* ---- 核心组合：作为一个整体单元进场 ---- */
+.boot-core {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  animation: bootEnter calc(var(--boot-dur) * 0.42) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ---- Logo 符号 ---- */
+/* 用 mask 套上当前前景色，明暗主题自动适配。
+   光泽层周期性掠过 + 光晕呼吸 + 极轻微悬浮 */
+.boot-mark {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  background-color: var(--fg);
+  overflow: hidden;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  animation: markBreathe calc(var(--boot-dur) * 0.75) ease-in-out calc(var(--boot-dur) * 0.1) infinite;
+}
+
+/* 光泽扫过层 */
+.boot-sheen {
+  position: absolute;
+  top: -12%;
+  bottom: -12%;
+  left: 0;
+  width: 46%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 65%, white) 50%,
+    transparent 100%
+  );
+  filter: blur(1px);
+  transform: translateX(-140%);
+  animation: markSweep calc(var(--boot-dur) * 0.3) linear calc(var(--boot-dur) * 0.1) infinite;
+}
+
+/* ---- 品牌字标 ---- */
+.boot-word {
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.24em;
+  text-indent: 0.12em;
+  text-transform: uppercase;
+  line-height: 1;
+  color: var(--fg);
+}
+
+/* ---- 进度细线：唯一的时间轴指示 ---- */
+.boot-line {
+  position: relative;
+  width: 128px;
+  height: 1px;
+  background: color-mix(in srgb, var(--fg) 14%, transparent);
+  overflow: hidden;
+}
+.boot-line::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  transform-origin: left center;
+  animation: bootDraw calc(var(--boot-dur) * 0.68) cubic-bezier(0.3, 0.1, 0.2, 1) calc(var(--boot-dur) * 0.16) both;
+}
+
+/* ========== 关键帧 ========== */
+
+@keyframes markSweep {
+  from { transform: translateX(-140%); }
+  to   { transform: translateX(340%); }
+}
+
+@keyframes markBreathe {
+  0%, 100% { filter: drop-shadow(0 0 8px  color-mix(in srgb, var(--accent) 16%, transparent)); }
+  50%      { filter: drop-shadow(0 0 16px color-mix(in srgb, var(--accent) 38%, transparent)); }
+}
+
+@keyframes bootEnter {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes bootDraw {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+@keyframes bootExit {
+  0%, 86% { opacity: 1; }
+  100%    { opacity: 0; }
+}
+
+/* ========== 减少动效 ========== */
+@media (prefers-reduced-motion: reduce) {
+  .boot-splash { animation: none; opacity: 1; }
+  .boot-core   { animation: none; opacity: 1; transform: none; filter: none; }
+  .boot-mark   { animation: none; filter: drop-shadow(0 0 16px color-mix(in srgb, var(--accent) 30%, transparent)); }
+  .boot-sheen  { display: none; }
+  .boot-line::after { animation: none; transform: none; }
+}

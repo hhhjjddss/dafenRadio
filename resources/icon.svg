@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a1520"/>
+      <stop offset="50%" stop-color="#2d1f3d"/>
+      <stop offset="100%" stop-color="#1a1520"/>
+    </linearGradient>
+    <linearGradient id="goldGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#d4a853"/>
+      <stop offset="50%" stop-color="#f0c864"/>
+      <stop offset="100%" stop-color="#d4a853"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="256" height="256" rx="56" fill="url(#bgGradient)"/>
+
+  <!-- 外圈 -->
+  <circle cx="128" cy="128" r="96" fill="none" stroke="url(#goldGradient)" stroke-width="6" filter="url(#glow)"/>
+
+  <!-- 内圈 -->
+  <circle cx="128" cy="128" r="48" fill="none" stroke="url(#goldGradient)" stroke-width="4" filter="url(#glow)"/>
+
+  <!-- 中心点 -->
+  <circle cx="128" cy="128" r="16" fill="url(#goldGradient)" filter="url(#glow)"/>
+</svg>
