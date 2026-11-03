@@ -1,7 +1,7 @@
 # DaFen Radio
 
-[![GitHub Release](https://img.shields.io/github/v/release/hhhjjddss/dafen-radio-LX-?style=flat-square)](https://github.com/hhhjjddss/dafen-radio-LX-/releases/latest)
-[![GitHub Downloads](https://img.shields.io/github/downloads/hhhjjddss/dafen-radio-LX-/total?style=flat-square&color=blue)](https://github.com/hhhjjddss/dafen-radio-LX-/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/hhhjjddss/dafenRadio?style=flat-square)](https://github.com/hhhjjddss/dafenRadio/releases/latest)
+[![GitHub Downloads](https://img.shields.io/github/downloads/hhhjjddss/dafenRadio/total?style=flat-square&color=blue)](https://github.com/hhhjjddss/dafenRadio/releases)
 
 > 网易云音乐 / 汽水音乐双平台扫码登录的桌面播放器
 
@@ -63,14 +63,14 @@
 
 ### 方式一：下载安装包（推荐）
 
-**[👉 点击前往 Releases 页面下载最新版本](https://github.com/hhhjjddss/dafen-radio-LX-/releases)**
+**[👉 点击前往 Releases 页面下载最新版本](https://github.com/hhhjjddss/dafenRadio/releases)**
 
 ### 方式二：自行构建
 
 ```bash
 # 克隆项目
-git clone https://github.com/hhhjjddss/dafen-radio-LX-.git
-cd dafen-radio-LX-
+git clone https://github.com/hhhjjddss/dafenRadio.git
+cd dafenRadio
 
 # 安装依赖
 npm install
