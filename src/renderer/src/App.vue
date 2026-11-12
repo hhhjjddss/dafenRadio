@@ -76,6 +76,8 @@
                   @play-track="playTrack"
                   @accent="handleExploreAccent"
                   @open-platform="handleExploreConnect"
+                  @open-login="openLogin(activePlatform)"
+                  @auth-error="handleAuthError(activePlatform, $event)"
                   @collection-open="handleCollectionOpen"
                   @collection-close="exploreDetailOpen = false"
                 />
@@ -167,6 +169,12 @@
         :favorite="currentIsFavorite"
         :lyric-bar-on="lyricBarOn"
         :fullscreen="isFullscreen"
+        :current-time="playerState.currentTime"
+        :duration="playerState.duration"
+        :trial-limit="playerState.trialSeconds"
+        :volume="playerState.volume"
+        :mode="playMode"
+        :mode-title="modeTitle"
         @close="closeLyrics"
         @toggle-lyric-bar="toggleLyricBar"
         @toggle-fullscreen="toggleFullscreen"
@@ -175,6 +183,10 @@
         @toggle-play="togglePlay"
         @next="playNext"
         @toggle-favorite="toggleCurrentFavorite"
+        @cycle-mode="cyclePlayMode"
+        @toggle-queue="toggleQueueFromLyrics"
+        @mute="toggleMute"
+        @volume="handleVolume"
       />
     </transition>
 
@@ -218,6 +230,7 @@
       :syncing="loginPlatform === 'soda' ? sodaSyncing : sessionSyncing"
       @close="showLogin = false"
       @logged-out="handleLoggedOut"
+      @expired="markPlatformAuthInvalid(loginPlatform, true)"
     />
     <transition name="welcome">
       <div v-if="showLoginSuccess" class="login-success" role="status" aria-live="polite" @click="dismissLoginSuccess">
@@ -245,11 +258,14 @@
       </div>
     </transition>
     <OnboardingGuide v-if="showOnboarding" @close="finishOnboarding" @expand-toolbar="foldToolbar(false)" />
-    <transition name="toast">
-      <div v-if="toast" class="toast-message" :class="toast.type">
-        <span><AlertCircle v-if="toast.type === 'error'" :size="12" /><Music2 v-else :size="12" /></span>{{ toast.message }}
-      </div>
-    </transition>
+    <div class="toast-stack" aria-live="polite">
+      <TransitionGroup name="toast" @before-leave="onToastBeforeLeave">
+        <div v-for="item in toasts" :key="item.id" class="toast-message" :class="item.type">
+          <span class="toast-icon"><AlertCircle v-if="item.type === 'error'" :size="12" /><Music2 v-else :size="12" /></span>
+          <span class="toast-text">{{ item.message }}</span>
+        </div>
+      </TransitionGroup>
+    </div>
   </div>
 </template>
 
@@ -321,6 +337,9 @@ const sodaMinePlaylists = ref<Playlist[]>([])
 const sodaProfile = ref<AccountProfile>(emptyProfile())
 const sodaConnected = ref(false)
 const sodaSyncing = ref(false)
+// 汽水的过期与同步失败要和网易云一样能停留在界面上，而不是只弹一次提示
+const sodaExpired = ref(false)
+const sodaLibraryError = ref('')
 type PlatformKey = 'netease' | 'soda'
 // 不同平台不同强调色：网易云默认红，汽水绿
 const PLATFORM_PALETTES: Record<PlatformKey, { accent: string; glow: string }> = {
@@ -351,6 +370,10 @@ const showLogin = ref(false)
 const loginPlatform = ref<PlatformKey>('netease')
 const booting = ref(true)
 const libraryLoading = ref(false)
+// 账号资料同步失败但登录态仍有效时要留在界面上，避免只剩一张缓存封面却没有任何解释
+const libraryError = ref('')
+// 凭据被服务端判定失效：提示条要给出「重新登录」而不是「重试」
+const neteaseExpired = ref(false)
 const sessionSyncing = ref(false)
 const sidebarOpen = ref(false)
 const platformOpen = ref(false)
@@ -386,8 +409,17 @@ const queueIndex = ref(-1)
 const queuePeek = ref(false)
 const recommendLoading = ref(false)
 const volumeBeforeMute = ref(0.5)
-const toast = ref<{ message: string; type: 'success' | 'error' } | null>(null)
-const toastTimer = ref<ReturnType<typeof setTimeout> | null>(null)
+// 提示按队列纵向堆叠：同时触发时也一条条出现、一条条消失
+type ToastItem = { id: number; message: string; type: 'success' | 'error' }
+type ToastPending = { message: string; type: 'success' | 'error'; duration?: number }
+const toasts = ref<ToastItem[]>([])
+const toastTimers = new Map<number, ReturnType<typeof setTimeout>>()
+const toastQueue: ToastPending[] = []
+let toastPump: ReturnType<typeof setTimeout> | null = null
+let toastShownAt = 0
+let toastSeq = 0
+const TOAST_MAX = 3
+const TOAST_STAGGER_MS = 160
 const showLoginSuccess = ref(false)
 let loginSuccessTimer: ReturnType<typeof setTimeout> | null = null
 // 心动模式开启小窗：只在手动点按钮时出现，队列载入完成或失败后自动收起
@@ -424,8 +456,11 @@ const activeProfile = computed(() => activePlatform.value === 'soda' ? sodaProfi
 const activeConnected = computed(() => activePlatform.value === 'soda' ? sodaConnected.value : connected.value)
 // 汽水没有成长等级，账号区用「暂无等级」占位，悬停时说明原因
 const accountTip = computed(() => {
-  const name = activeProfile.value.name || '账号'
-  if (!activeConnected.value || activeProfile.value.level) return name
+  const current = activeProfile.value
+  const name = current.name || '账号'
+  if (!activeConnected.value) return name
+  if (!current.name) return '账号资料尚未同步完成'
+  if (current.level) return name
   return `${name} · ${activePlatform.value === 'soda' ? '汽水音乐暂不提供等级' : '暂未获取到等级'}`
 })
 const loginProfileName = computed(() => loginPlatform.value === 'soda' ? sodaProfile.value.name : profile.value.name)
@@ -693,6 +728,7 @@ function onWindowBlur() {
 function onWindowFocus() {
   windowFocused = true
   syncPowerSavePause()
+  void revalidateActiveSession()
   if (showLyrics.value && playerState.isPlaying && !document.hidden && !lyricFrame) {
     lyricTime.value = getCurrentTime()
     syncActiveLyric(lyricTime.value)
@@ -711,6 +747,7 @@ function onVisibilityChange() {
   lyricTime.value = getCurrentTime()
   syncActiveLyric(lyricTime.value)
   if (showLyrics.value && playerState.isPlaying) startLyricClock()
+  void revalidateActiveSession()
 }
 
 // 迷你播放条上的动态歌词：当前行 + 下一行
@@ -742,6 +779,44 @@ function mapError(result: any, fallback: string) {
   return result.data
 }
 
+// 主进程把「没有凭据」和「凭据过期」都放在错误文案里，这里统一识别
+function isAuthFailure(message: string) {
+  return message.includes('登录已失效') || message.includes('请先连接') || message.includes('请先登录')
+}
+
+// 掉线的唯一收口：任何接口发现凭据失效都走这里，保证两个平台的清理与提示一致
+function markPlatformAuthInvalid(platform: PlatformKey, expired: boolean) {
+  const alreadyExpired = platform === 'soda' ? sodaExpired.value : neteaseExpired.value
+  if (platform === 'soda') {
+    sodaConnected.value = false
+    sodaExpired.value = expired
+    sodaLibraryError.value = expired ? '汽水登录已过期，请重新扫码登录' : ''
+    sodaProfile.value = emptyProfile()
+    sodaMinePlaylists.value = []
+    clearSodaRecommendations()
+  } else {
+    connected.value = false
+    neteaseExpired.value = expired
+    libraryError.value = expired ? '网易云登录已过期，请重新扫码登录' : ''
+    profile.value = emptyProfile()
+    albums.value = []
+    playlists.value = []
+    recommendations.value = []
+  }
+  exploreRef.value?.reset()
+  // 只在首次判定过期且正在看这个平台时提醒，避免每次打开弹层都重复弹一次
+  if (expired && !alreadyExpired && activePlatform.value === platform) {
+    notify(platform === 'soda' ? '汽水登录已过期，请重新扫码登录' : '网易云登录已过期，请重新扫码登录', 'error', 4200)
+  }
+}
+
+// 请求报错时先看是不是登录问题；返回 true 表示已经处理，调用方不用再弹错误
+function handleAuthError(platform: PlatformKey, message: string) {
+  if (!isAuthFailure(message)) return false
+  markPlatformAuthInvalid(platform, message.includes('登录已失效'))
+  return true
+}
+
 async function syncLikedSongs(): Promise<boolean> {
   const epoch = accountEpoch
   const requestId = ++likedRequestId
@@ -763,6 +838,8 @@ async function loadLibrary(): Promise<boolean> {
   const epoch = accountEpoch
   const requestId = ++libraryRequestId
   libraryLoading.value = true
+  libraryError.value = ''
+  neteaseExpired.value = false
   try {
     const data = mapError(await window.api.neteaseLibrary(), '暂时无法读取网易云音乐资料')
     if (epoch !== accountEpoch || requestId !== libraryRequestId) return false
@@ -774,8 +851,10 @@ async function loadLibrary(): Promise<boolean> {
     return true
   } catch (error: any) {
     if (epoch !== accountEpoch || requestId !== libraryRequestId) return false
-    if (String(error.message || '').includes('登录已失效') || String(error.message || '').includes('请先连接')) connected.value = false
-    if (error.message && !error.message.includes('请先连接')) notify(error.message, 'error')
+    const message = String(error.message || '')
+    if (handleAuthError('netease', message)) return false
+    // 网络或服务异常：登录态保留，把原因记下来供切换平台时重试
+    libraryError.value = message || '账号资料同步失败'
     return false
   } finally {
     if (requestId === libraryRequestId) libraryLoading.value = false
@@ -799,8 +878,13 @@ async function loadSodaRecommendations(force = false) {
     const data = mapError(await window.api.sodaRecommend(force), '暂时无法读取汽水推荐')
     if (requestId !== sodaRequestId) return
     sodaPlaylists.value = data as Playlist[]
+    sodaLibraryError.value = ''
   } catch (error: any) {
     if (requestId !== sodaRequestId) return
+    const message = String(error?.message || '')
+    // 推荐接口是第一道能发现凭据失效的入口，这里就要把状态改过来
+    if (handleAuthError('soda', message)) return
+    sodaLibraryError.value = message || '汽水推荐加载失败'
     notify(error.message || '汽水推荐加载失败，请稍后重试', 'error')
   } finally {
     if (requestId === sodaRequestId) sodaLoading.value = false
@@ -820,15 +904,17 @@ async function loadSodaLibrary(epoch = sodaAccountEpoch): Promise<boolean> {
     sodaProfile.value = { ...emptyProfile(), ...(data.profile || {}) }
     sodaMinePlaylists.value = data.playlists || []
     sodaConnected.value = true
+    sodaExpired.value = false
+    sodaLibraryError.value = ''
     return true
   } catch (error: any) {
     if (epoch !== sodaAccountEpoch) return false
     const message = String(error?.message || '')
-    if (message.includes('登录已失效') || message.includes('请先登录')) {
-      sodaConnected.value = false
-      sodaProfile.value = emptyProfile()
-      sodaMinePlaylists.value = []
+    if (handleAuthError('soda', message)) {
+      console.warn('[汽水] 同步账号资料失败:', message || error)
+      return false
     }
+    sodaLibraryError.value = message || '汽水账号资料同步失败'
     console.warn('[汽水] 同步账号资料失败:', message || error)
     return false
   }
@@ -837,11 +923,25 @@ async function loadSodaLibrary(epoch = sodaAccountEpoch): Promise<boolean> {
 async function refreshSodaConnection() {
   const epoch = sodaAccountEpoch
   try {
-    const result = await window.api.sodaConfigured()
+    // 和网易云一致：先校验凭据是否真的还有效，过期时明确提示重新登录
+    const result = await window.api.sodaSessionInfo()
     if (epoch !== sodaAccountEpoch) return
-    if (!result?.data) { sodaConnected.value = false; clearSodaRecommendations(); return }
-    sodaConnected.value = true
-    await loadSodaLibrary(epoch)
+    const info = result?.data
+    sodaConnected.value = Boolean(info?.connected)
+    if (Boolean(info?.expired)) {
+      markPlatformAuthInvalid('soda', true)
+      return
+    }
+    sodaExpired.value = false
+    if (!sodaConnected.value) {
+      sodaLibraryError.value = ''
+      clearSodaRecommendations()
+      return
+    }
+    const libraryOk = await loadSodaLibrary(epoch)
+    if (!libraryOk && !sodaExpired.value && epoch === sodaAccountEpoch) {
+      notify(sodaLibraryError.value || '汽水账号资料同步失败，稍后可重试', 'error')
+    }
   } catch {
     if (epoch === sodaAccountEpoch) { sodaConnected.value = false; clearSodaRecommendations() }
   }
@@ -850,6 +950,7 @@ async function refreshSodaConnection() {
 async function handleSodaConnected() {
   const epoch = ++sodaAccountEpoch
   sodaConnected.value = true
+  sodaExpired.value = false
   sodaSyncing.value = true
   // 扫码确认即登录成功：先收起登录浮层并弹窗，资料与封面继续在后台同步
   showLogin.value = false
@@ -857,7 +958,8 @@ async function handleSodaConnected() {
   try {
     const ok = await loadSodaLibrary(epoch)
     if (epoch !== sodaAccountEpoch) return
-    if (!ok) notify('已登录汽水音乐，部分资料同步失败，稍后可重试', 'error', 4200)
+    // 过期提示已经由统一收口弹过，这里只补普通同步失败
+    if (!ok && !sodaExpired.value) notify('已登录汽水音乐，部分资料同步失败，稍后可重试', 'error', 4200)
     if (activePlatform.value === 'soda') void loadSodaRecommendations()
   } finally {
     if (epoch === sodaAccountEpoch) sodaSyncing.value = false
@@ -868,6 +970,8 @@ function handleSodaLoggedOut() {
   sodaAccountEpoch++
   sodaConnected.value = false
   sodaSyncing.value = false
+  sodaExpired.value = false
+  sodaLibraryError.value = ''
   sodaProfile.value = emptyProfile()
   sodaMinePlaylists.value = []
   showLogin.value = false
@@ -885,13 +989,24 @@ function handleSodaLoggedOut() {
 async function refreshConnection() {
   const epoch = accountEpoch
   try {
-    const result = await window.api.neteaseConfigured()
+    // 校验真实登录态：凭据过期时明确告知，而不是把空数据当成缓存问题
+    const result = await window.api.neteaseSessionInfo()
     if (epoch !== accountEpoch) return
-    connected.value = Boolean(result.data)
-    if (connected.value) {
-      sessionSyncing.value = true
-      await Promise.all([loadLibrary(), syncLikedSongs()])
+    const info = result?.data
+    connected.value = Boolean(info?.connected)
+    if (Boolean(info?.expired)) {
+      // 过期后上一轮的资料不能再留在界面上，否则又会出现「只有一个缓存封面」
+      markPlatformAuthInvalid('netease', true)
+      return
     }
+    neteaseExpired.value = false
+    if (!connected.value) {
+      libraryError.value = ''
+      return
+    }
+    sessionSyncing.value = true
+    const [libraryOk] = await Promise.all([loadLibrary(), syncLikedSongs()])
+    if (!libraryOk && !neteaseExpired.value) notify(libraryError.value || '网易云资料同步失败，稍后可重试', 'error')
   } catch {
     if (epoch === accountEpoch) connected.value = false
   } finally {
@@ -899,6 +1014,36 @@ async function refreshConnection() {
     if (epoch === accountEpoch) sessionSyncing.value = false
   }
 }
+
+let sessionRecheckAt = 0
+let sessionRechecking = false
+
+// 程序长时间挂在后台或托盘时凭据可能悄悄过期：回到前台/切平台时低频复检一次，
+// 让界面在用户下一次点击前就切到过期态，而不是等下一次资料同步才发现
+async function revalidateActiveSession(force = false) {
+  if (sessionRechecking) return
+  const now = Date.now()
+  if (!force && now - sessionRecheckAt < 2 * 60_000) return
+  const platform = activePlatform.value
+  if (platform === 'soda' ? !sodaConnected.value : !connected.value) return
+  sessionRecheckAt = now
+  const epoch = platform === 'soda' ? sodaAccountEpoch : accountEpoch
+  sessionRechecking = true
+  try {
+    const result = platform === 'soda'
+      ? await window.api.sodaSessionInfo()
+      : await window.api.neteaseSessionInfo()
+    if (platform !== activePlatform.value) return
+    if (epoch !== (platform === 'soda' ? sodaAccountEpoch : accountEpoch)) return
+    if (result?.data?.expired) markPlatformAuthInvalid(platform, true)
+  } catch {
+    // 网络异常不是登录结论，保留现有状态
+  } finally {
+    sessionRechecking = false
+  }
+}
+
+// 探索页提示条的动作：过期时去重新登录，其余同步失败按当前平台补一次
 
 async function handleConnected() {
   const epoch = ++accountEpoch
@@ -912,7 +1057,10 @@ async function handleConnected() {
   try {
     const [libraryOk, likedOk] = await Promise.all([loadLibrary(), syncLikedSongs()])
     if (epoch !== accountEpoch) return
-    if (!libraryOk || !likedOk) notify('已登录网易云音乐，部分资料同步失败，稍后可重试', 'error', 4200)
+    // 过期/未连接已经由统一收口处理，这里只补普通同步失败
+    if ((!libraryOk || !likedOk) && !neteaseExpired.value) {
+      notify('已登录网易云音乐，部分资料同步失败，稍后可重试', 'error', 4200)
+    }
   } finally {
     if (epoch === accountEpoch) sessionSyncing.value = false
   }
@@ -934,6 +1082,8 @@ function handleLoggedOut(platform: PlatformKey = 'netease') {
   libraryRequestId++
   likedRequestId++
   libraryLoading.value = false
+  libraryError.value = ''
+  neteaseExpired.value = false
   sessionSyncing.value = false
   connected.value = false
   profile.value = emptyProfile()
@@ -1073,8 +1223,15 @@ function openPlatform(platform: PlatformKey) {
       if (sodaConnected.value) void loadSodaRecommendations()
       else openLogin('soda')
     }
+    // 推荐有缓存时切平台不会发请求，这里主动校验一次，过期能立刻亮出来
+    void revalidateActiveSession(true)
   }
   if (platform === 'netease' && !connected.value) openLogin('netease')
+  // 上一次同步失败或资料为空时，切回该平台顺手补一次，避免一直停在“只有缓存封面”的状态
+  if (platform === 'netease' && connected.value && !sessionSyncing.value
+    && !libraryLoading.value && (libraryError.value || !playlists.value.length)) {
+    void refreshConnection()
+  }
   if (platform === 'soda' && !sodaConnected.value) openLogin('soda')
 }
 
@@ -1096,7 +1253,10 @@ async function searchMusic(word: string) {
       submittedKeyword.value = word
       searched.value = true
     } catch (error: any) {
-      if (requestId === sodaSearchRequestId) notify(error.message || '搜索失败，请稍后重试', 'error')
+      if (requestId !== sodaSearchRequestId) return
+      const message = String(error?.message || '')
+      if (handleAuthError('soda', message)) return
+      notify(message || '搜索失败，请稍后重试', 'error')
     } finally {
       if (requestId === sodaSearchRequestId) sodaSearching.value = false
     }
@@ -1106,7 +1266,11 @@ async function searchMusic(word: string) {
     await search(word)
     submittedKeyword.value = word
     searched.value = true
-  } catch (error: any) { notify(error.message || '搜索失败，请稍后重试', 'error') }
+  } catch (error: any) {
+    const message = String(error?.message || '')
+    if (handleAuthError('netease', message)) return
+    notify(message || '搜索失败，请稍后重试', 'error')
+  }
 }
 
 function clearSearch() {
@@ -1140,6 +1304,13 @@ function playSearchTrack(track: MusicInfo, index: number) {
   void playTrack(track, searchResults.value, index)
 }
 
+// 播放链路里的错误也统一过一遍登录判定，避免掉线后只剩一句「无法播放」
+function reportPlaybackError(error: any, fallback: string) {
+  const message = String(error?.message || '')
+  if (handleAuthError(activePlatform.value, message)) return
+  notify(message || fallback, 'error')
+}
+
 async function playTrack(track: MusicInfo, queue: MusicInfo[] = [track], index = 0) {
   if (track.unavailable) {
     notify(`「${track.name}」已下架或版权受限，无法播放`, 'error')
@@ -1170,7 +1341,7 @@ async function playTrack(track: MusicInfo, queue: MusicInfo[] = [track], index =
   try {
     await play(track)
     commitIndex(playIndex)
-  } catch (error: any) { notify(error.message || '歌曲暂时无法播放', 'error') }
+  } catch (error: any) { reportPlaybackError(error, '歌曲暂时无法播放') }
 }
 
 function playQueueIndex(index: number) {
@@ -1196,7 +1367,9 @@ async function expandCollection(collection: { id: string; name: string; cover: s
     collectionTracks.value = tracks
   } catch (error: any) {
     if (requestId !== collectionRequestId) return
-    collectionError.value = error.message || '暂时无法打开这份歌单'
+    const message = String(error?.message || '')
+    if (handleAuthError(platform, message)) { closeCollection(); return }
+    collectionError.value = message || '暂时无法打开这份歌单'
   } finally {
     if (requestId === collectionRequestId) collectionLoading.value = false
   }
@@ -1314,8 +1487,10 @@ async function startRecommendedPlayback(auto = false) {
       heartOpeningTimer = setTimeout(dismissHeartOpening, 1200)
     }
   } catch (error: any) {
-    // 启动时的网络波动不弹红色错误，手动触发才提示
-    if (!auto) notify(error?.message || '推荐播放失败，请稍后重试', 'error')
+    const message = String(error?.message || '')
+    // 登录失效无论手动还是自动都要落状态；普通失败保持启动时不弹红色错误
+    const handled = handleAuthError(platform, message)
+    if (!auto && !handled) notify(message || '推荐播放失败，请稍后重试', 'error')
   } finally {
     recommendLoading.value = false
     if (heartOpening.value === 'opening') dismissHeartOpening()
@@ -1338,19 +1513,21 @@ async function toggleCurrentFavorite() {
   } catch (error: any) {
     // 退出登录/切换账号后，迟到的失败结果不再改写本地收藏
     if (epoch !== accountEpoch) return
+    const message = String(error?.message || '')
     toggleFavorite(track)
-    notify(`网易云同步失败：${error.message || '请稍后重试'}`, 'error')
+    if (handleAuthError('netease', message)) return
+    notify(`网易云同步失败：${message || '请稍后重试'}`, 'error')
   }
 }
 
 function playPrevious() {
   const previous = getPrevTrack(playMode.value)
-  if (previous) { queueIndex.value = getCurrentInfo().index; void play(previous).then(() => commitIndex(getCurrentInfo().index)).catch((error: any) => notify(error.message || '上一首暂时无法播放', 'error')) }
+  if (previous) { queueIndex.value = getCurrentInfo().index; void play(previous).then(() => commitIndex(getCurrentInfo().index)).catch((error: any) => reportPlaybackError(error, '上一首暂时无法播放')) }
 }
 
 function playNext() {
   const next = getNextTrack(playMode.value)
-  if (next) { queueIndex.value = getCurrentInfo().index; void play(next).then(() => commitIndex(getCurrentInfo().index)).catch((error: any) => notify(error.message || '下一首暂时无法播放', 'error')) }
+  if (next) { queueIndex.value = getCurrentInfo().index; void play(next).then(() => commitIndex(getCurrentInfo().index)).catch((error: any) => reportPlaybackError(error, '下一首暂时无法播放')) }
 }
 
 function cyclePlayMode() {
@@ -1380,6 +1557,12 @@ async function closeLyrics() {
   showLyrics.value = false
   try { await window.api.exitFullscreen() } catch { /* 忽略 */ }
   isFullscreen.value = false
+}
+
+// 队列浮层在舞台内（z-index 低于沉浸歌词页），从歌词页点队列要先收起歌词页再展开队列
+function toggleQueueFromLyrics() {
+  void closeLyrics()
+  queuePeek.value = !queuePeek.value
 }
 
 async function toggleFullscreen() {
@@ -1413,9 +1596,42 @@ function onWindowPointerMove(event: MouseEvent) {
 
 /* ============ 提示 ============ */
 function notify(message: string, type: 'success' | 'error' = 'success', duration?: number) {
-  toast.value = { message, type }
-  if (toastTimer.value) clearTimeout(toastTimer.value)
-  toastTimer.value = setTimeout(() => { toast.value = null }, duration ?? (type === 'error' ? 4200 : 2600))
+  if (!message) return
+  toastQueue.push({ message, type, duration })
+  pumpToasts()
+}
+
+// 队列按固定间隔逐条上屏：第二条不会和第一条同时挤出来
+function pumpToasts() {
+  if (toastPump || !toastQueue.length) return
+  const wait = Math.max(0, TOAST_STAGGER_MS - (Date.now() - toastShownAt))
+  if (wait > 0) {
+    toastPump = setTimeout(() => { toastPump = null; pumpToasts() }, wait)
+    return
+  }
+  const next = toastQueue.shift()
+  if (!next) return
+  const id = ++toastSeq
+  toasts.value.push({ id, message: next.message, type: next.type })
+  if (toasts.value.length > TOAST_MAX) dismissToast(toasts.value[0].id)
+  toastTimers.set(id, setTimeout(() => dismissToast(id), next.duration ?? (next.type === 'error' ? 4200 : 2600)))
+  toastShownAt = Date.now()
+  pumpToasts()
+}
+
+function dismissToast(id: number) {
+  const timer = toastTimers.get(id)
+  if (timer) { clearTimeout(timer); toastTimers.delete(id) }
+  toasts.value = toasts.value.filter(item => item.id !== id)
+}
+
+// 离场元素被 absolute 化后，flex 容器里的静态位置会跳到队列顶部，且水平上
+// 会随容器宽度收缩往左跑；趁它还在文档流里把原坐标钉进内联样式，淡出就发生在原位
+function onToastBeforeLeave(el: Element) {
+  const node = el as HTMLElement
+  node.style.left = `${node.offsetLeft}px`
+  node.style.top = `${node.offsetTop}px`
+  node.style.translate = '0 0'
 }
 
 function revealLoginSuccess() {
@@ -1446,7 +1662,7 @@ function onTrackEnded(event: Event) {
   if (!next?.track) return
   commitIndex(next.index)
   queueIndex.value = next.index
-  void play(next.track).catch((error: any) => notify(error.message || '下一首暂时无法播放', 'error'))
+  void play(next.track).catch((error: any) => reportPlaybackError(error, '下一首暂时无法播放'))
 }
 
 function onTrialPlayback(event: Event) {
@@ -1587,6 +1803,8 @@ onMounted(() => {
   // 等账号状态确认、开屏收起后再自动开播，避免未登录时弹登录或和启动动画抢时间
   void (async () => {
     await Promise.allSettled([refreshConnection(), refreshSodaConnection()])
+    // 启动刚校验过，记下时间，避免窗口一获得焦点就重复请求
+    sessionRecheckAt = Date.now()
     if (activePlatform.value === 'soda' && sodaConnected.value) await loadSodaRecommendations()
     if (showSplash.value) {
       await new Promise<void>((resolve) => {
@@ -1646,7 +1864,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('blur', onWindowBlur)
   window.removeEventListener('focus', onWindowFocus)
   if (windowBarTimer) clearTimeout(windowBarTimer)
-  if (toastTimer.value) clearTimeout(toastTimer.value)
+  if (toastPump) { clearTimeout(toastPump); toastPump = null }
+  toastQueue.length = 0
+  toastTimers.forEach(timer => clearTimeout(timer))
+  toastTimers.clear()
   if (loginSuccessTimer) clearTimeout(loginSuccessTimer)
 })
 </script>
@@ -1778,25 +1999,56 @@ onBeforeUnmount(() => {
 /* ============ 过渡 ============ */
 .veil-enter-active, .veil-leave-active { transition: opacity 0.28s ease; }
 .veil-enter-from, .veil-leave-to { opacity: 0; }
+.toast-stack {
+  position: fixed;
+  top: 52px;
+  left: 50%;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  /* 固定宽度：toast 绝对定位离场后不再参与 shrink-to-fit，避免容器突然变窄让所有条左移 */
+  width: min(560px, calc(100vw - 48px));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
 .toast-message {
-  position: fixed; top: 52px; left: 50%; z-index: 60;
+  position: relative;
   display: flex; align-items: center; gap: 9px;
+  max-width: 100%;
   padding: 10px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.68);
   border-radius: var(--r-full);
-  background: rgba(255, 255, 255, 0.34);
-  box-shadow: 0 18px 44px rgba(70, 55, 110, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.6);
-  backdrop-filter: blur(34px) saturate(1.35);
-  -webkit-backdrop-filter: blur(34px) saturate(1.35);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.4));
+  box-shadow: 0 14px 32px rgba(70, 55, 110, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  /* 模糊半径从 32 收到 18：保留玻璃质感，多条同时动画时采样开销减半以上 */
+  backdrop-filter: blur(18px) saturate(1.5);
+  -webkit-backdrop-filter: blur(18px) saturate(1.5);
   color: var(--text-primary);
   font-size: 11.5px;
-  transform: translateX(-50%);
+  line-height: 1.35;
 }
-.toast-message > span { width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; background: var(--amber); color: #fff; font: 600 10px var(--font-mono); }
+.toast-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toast-icon { flex: none; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; background: var(--amber); color: #fff; font: 600 10px var(--font-mono); }
 .toast-message.error { border-color: rgba(224, 99, 111, 0.45); }
-.toast-message.error > span { background: var(--ruby); color: #fff; }
-.toast-enter-active, .toast-leave-active { transition: opacity 0.2s, transform 0.2s; }
-.toast-enter-from, .toast-leave-to { opacity: 0; transform: translate(-50%, -8px); }
+.toast-message.error .toast-icon { background: var(--ruby); color: #fff; }
+.toast-enter-active, .toast-leave-active { transition: opacity 0.32s ease, transform 0.32s cubic-bezier(0.22, 1, 0.36, 1); will-change: transform, opacity; }
+.toast-enter-from, .toast-leave-to { opacity: 0; transform: translateY(-8px); }
+/* 离场时脱离文档流，下面一条才能同时上移，而不是等淡出结束后再跳一下 */
+/* left/top 的兜底值会被 @before-leave 钩子写入的原坐标内联覆盖 */
+.toast-leave-active {
+  position: absolute;
+  left: 50%;
+  top: auto;
+  translate: -50% 0;
+}
+.toast-move { transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1); will-change: transform; }
 .login-success {
   position: fixed;
   top: 50%;
@@ -1938,5 +2190,8 @@ onBeforeUnmount(() => {
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  /* toast 例外：完全压掉过渡会让提示瞬间消失、堆叠位移直接跳变，看起来像 bug；
+     保留一段短过渡，仍远低于常规动效幅度 */
+  .toast-enter-active, .toast-leave-active, .toast-move { transition-duration: 0.15s !important; }
 }
 </style>

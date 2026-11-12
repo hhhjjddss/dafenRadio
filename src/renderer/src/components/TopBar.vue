@@ -71,12 +71,13 @@
             <template v-else>{{ account.name.slice(0, 1) }}</template>
           </span>
         </button>
-        <div v-if="account.vip || account.level || accountConnected" class="account-meta">
-          <span v-if="accountConnected" class="vip-badge" :class="account.vip || 'none'">
+        <!-- 资料同步完成（有昵称）后再展示会员/等级，避免未同步时误标成「VIP · 无等级」 -->
+        <div v-if="account.name" class="account-meta">
+          <span v-if="account.vip" class="vip-badge" :class="account.vip">
             {{ account.vip === 'svip' ? 'SVIP' : 'VIP' }}
           </span>
           <span v-if="account.level" class="level-badge">Lv{{ account.level }}</span>
-          <span v-else-if="accountConnected" class="level-badge level-empty">无等级</span>
+          <span v-else class="level-badge level-empty">无等级</span>
         </div>
       </div>
     </div>
@@ -338,12 +339,6 @@ const navItems = [
   color: #ffe9b5;
   box-shadow: inset 0 0 0 1px rgba(255, 226, 166, 0.35);
 }
-/* 没有会员时字段仍保留：灰底白字，和等级徽标一样清晰 */
-.vip-badge.none {
-  border: 1px solid rgba(70, 55, 110, 0.16);
-  background: linear-gradient(135deg, #a6a3b0, #8c8996);
-  color: #fff;
-}
 .level-badge {
   padding: 1px 6px;
   border-radius: 6px;
@@ -388,7 +383,20 @@ const navItems = [
 }
 /* 浅底上悬浮，图标压成黑色才看得清 */
 .app-shell.float-top .topbar-actions .round-action { color: #191722; }
-.app-shell.float-top .topbar-actions .round-action:hover { color: #000; }
+/* 浮层状态下基础玻璃底优先级更高，hover 必须同权重提亮，否则悬停毫无反馈 */
+.app-shell.explore-full .topbar-actions .round-action:hover,
+.app-shell.float-top .topbar-actions .round-action:hover {
+  color: #000;
+  border-color: var(--glass-border-hover);
+  background: rgba(255, 255, 255, 0.6);
+}
+/* 平台切换按钮保留品牌色 hover，不被上面的提亮盖掉 */
+.app-shell.explore-full .topbar-actions .round-action.platform-trigger:hover,
+.app-shell.float-top .topbar-actions .round-action.platform-trigger:hover {
+  color: var(--brand-accent-deep);
+  border-color: var(--brand-accent-line);
+  background: var(--brand-accent-soft);
+}
 .app-shell.explore-full .round-action.platform-trigger { border-color: var(--brand-accent-line); }
 .app-shell.explore-full .account-chip { border-color: var(--brand-accent-line); }
 /* 歌单详情页：返回键自带退出路径，整组顶部控件都不再显示，避免压在列表上 */

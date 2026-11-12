@@ -484,6 +484,22 @@ export async function hasNeteaseSession() {
   }
 }
 
+// 区分「从未登录」和「凭据过期」：过期时界面要明确提示重新扫码，
+// 而不是只显示未连接，让人误以为主界面的空数据是缓存问题。
+export async function getNeteaseSessionInfo(): Promise<{ connected: boolean; expired: boolean }> {
+  loadSession()
+  if (!sessionCookie) return { connected: false, expired: false }
+  try {
+    const { body } = await requestApi('/login/status', sessionCookie)
+    if (neteaseSessionState(body) === 'anonymous') return { connected: false, expired: true }
+    return { connected: true, expired: false }
+  } catch (error: any) {
+    // 网络或本地服务异常不是登录结论，保留已保存的登录态
+    console.warn('[网易云] 登录状态校验失败，保留已保存的登录态:', error?.message || error)
+    return { connected: true, expired: false }
+  }
+}
+
 // 会员标识：fee=1 才是会员专享；fee=8 仅高音质/下载需会员，普通音质可免费播放，不标记
 function vipTag(song: any): '' | 'vip' | 'paid' {
   const fee = Number(song?.fee ?? song?.privilege?.fee ?? 0)

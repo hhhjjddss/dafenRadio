@@ -83,6 +83,7 @@ const api = {
   neteaseLyrics: (songId: string) => ipcRenderer.invoke('netease:lyrics', songId),
   neteaseLyricsSearch: (name: string, singer: string, duration = 0) => ipcRenderer.invoke('netease:lyricsSearch', name, singer, duration),
   neteaseConfigured: () => ipcRenderer.invoke('netease:configured'),
+  neteaseSessionInfo: () => ipcRenderer.invoke('netease:sessionInfo') as Promise<{ success: boolean; data?: { connected: boolean; expired: boolean }; error?: string }>,
   neteaseLoginQr: () => ipcRenderer.invoke('netease:loginQr'),
   neteaseLoginState: () => ipcRenderer.invoke('netease:loginState'),
   onNeteaseLoginState: (callback: (state: any) => void) => {
@@ -106,6 +107,7 @@ const api = {
     return () => ipcRenderer.removeListener('soda:login-state', handler)
   },
   sodaConfigured: () => ipcRenderer.invoke('soda:configured'),
+  sodaSessionInfo: () => ipcRenderer.invoke('soda:sessionInfo') as Promise<{ success: boolean; data?: { connected: boolean; expired: boolean }; error?: string }>,
   sodaLogout: () => ipcRenderer.invoke('soda:logout'),
   sodaLibrary: () => ipcRenderer.invoke('soda:library'),
 

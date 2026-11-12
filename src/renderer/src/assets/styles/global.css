@@ -78,10 +78,11 @@
   --blur-glass: 22px;
   --blur-heavy: 46px;
 
-  /* === 字体：Outfit 几何无衬线（拉丁）+ 系统中文回退 === */
-  --font-display: 'Outfit', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
-  --font-body: 'Outfit', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
-  --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  /* === 字体：Outfit 几何无衬线（拉丁）+ 霞鹜文楷 Mono（中文）===
+     字体文件随包内置（result.css 按 unicode-range 分片），离线可用 */
+  --font-display: 'Outfit', 'LXGW WenKai Mono', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-body: 'Outfit', 'LXGW WenKai Mono', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-mono: 'JetBrains Mono', 'LXGW WenKai Mono', 'Cascadia Mono', Consolas, monospace;
 
   --space-xs: 4px;
   --space-sm: 8px;

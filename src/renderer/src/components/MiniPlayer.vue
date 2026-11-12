@@ -46,7 +46,7 @@
               class="mini-title"
               :class="{ scrolling: titleScroll !== null, held: titleScroll !== null && !playing }"
               :style="titleStyle"
-            >{{ track?.name || '让音乐开始' }}</strong>
+            ><span class="title-seg">{{ track?.name || '让音乐开始' }}</span><span v-if="titleScroll !== null" class="title-seg" aria-hidden="true">{{ track?.name || '让音乐开始' }}</span></strong>
           </span>
           <i v-if="track?.vip" class="vip-tag" :class="track.vip">{{ track.vip === 'paid' ? '付费' : 'VIP' }}</i>
         </div>
@@ -193,9 +193,9 @@ const modeIconComponent = computed(() => {
 
 const rootEl = ref<HTMLElement | null>(null)
 const lyricEl = ref<HTMLElement | null>(null)
-// 唱片用纯 CSS 匀速转，不经过 GSAP，也不做 3D；只在系统要求减少动态时停下
+// 唱片用纯 CSS 匀速转，不经过 GSAP，也不做 3D；只在播放中转，暂停即停，系统要求减少动态时永不转
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-const spinActive = !reduceMotion
+const spinActive = computed(() => props.playing && !reduceMotion)
 let entrance: gsap.core.Timeline | null = null
 
 const progressPercent = computed(() => props.duration ? Math.min(100, props.currentTime / props.duration * 100) : 0)
@@ -207,12 +207,12 @@ const trialPercent = computed(() => {
 })
 const volumePercent = computed(() => Math.round(props.volume * 100))
 
-// 歌名放不下时来回滚动，而不是直接省略
+// 歌名放不下时单向循环滚动（无缝跑马灯），而不是来回折返
+const TITLE_SEG_GAP = 30
 const titleClipEl = ref<HTMLElement | null>(null)
 const titleEl = ref<HTMLElement | null>(null)
-const titleScroll = ref<{ shift: number; duration: number } | null>(null)
+const titleScroll = ref<{ duration: number } | null>(null)
 const titleStyle = computed(() => titleScroll.value ? {
-  '--title-shift': `${titleScroll.value.shift}px`,
   '--title-duration': `${titleScroll.value.duration}s`
 } : {})
 
@@ -220,11 +220,12 @@ function measureTitle() {
   const clip = titleClipEl.value
   const el = titleEl.value
   if (!clip || !el) { titleScroll.value = null; return }
-  const overflow = el.scrollWidth - clip.clientWidth
+  const seg = el.querySelector<HTMLElement>('.title-seg')
+  const segWidth = seg ? seg.getBoundingClientRect().width : el.scrollWidth
+  const overflow = segWidth + TITLE_SEG_GAP - clip.clientWidth
   if (reduceMotion || overflow <= 2) { titleScroll.value = null; return }
   titleScroll.value = {
-    shift: -overflow,
-    duration: Math.min(9, Math.max(3.2, 2.6 + overflow / 26))
+    duration: Math.min(12, Math.max(4, 3 + overflow / 22))
   }
 }
 
@@ -288,10 +289,11 @@ function enter() {
   if (reduceMotion || !rootEl.value) return
   entrance?.kill()
   entrance = gsap.timeline({ defaults: { ease: 'power3.out' } })
-  entrance.fromTo(rootEl.value, { autoAlpha: 0, y: 30, scale: 0.98 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.7 })
-  entrance.fromTo('.mini-cover', { autoAlpha: 0, scale: 0.7 }, { autoAlpha: 1, scale: 1, duration: 0.55 }, '-=0.45')
-  entrance.fromTo('.mini-meta > *', { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.4, stagger: 0.05 }, '-=0.5')
-  entrance.fromTo('.mini-right', { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.4 }, '-=0.45')
+  // 动画收尾必须清掉 transform：残留的 scale/translate 会让合成层里的文字被重采样发虚
+  entrance.fromTo(rootEl.value, { autoAlpha: 0, y: 30, scale: 0.98 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.7, clearProps: 'transform' })
+  entrance.fromTo('.mini-cover', { autoAlpha: 0, scale: 0.7 }, { autoAlpha: 1, scale: 1, duration: 0.55, clearProps: 'transform' }, '-=0.45')
+  entrance.fromTo('.mini-meta > *', { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.4, stagger: 0.05, clearProps: 'transform' }, '-=0.5')
+  entrance.fromTo('.mini-right', { autoAlpha: 0, y: 8 }, { autoAlpha: 1, y: 0, duration: 0.4, clearProps: 'transform' }, '-=0.45')
 }
 
 onMounted(async () => {
@@ -310,11 +312,10 @@ watch(() => props.track?.name, async () => {
 })
 watch(() => props.currentLyric, async () => {
   if (reduceMotion || !lyricEl.value) return
-  gsap.fromTo(lyricEl.value, { autoAlpha: 0, y: 7, filter: 'blur(4px)' }, { autoAlpha: 1, y: 0, filter: 'blur(0px)', duration: 0.45, ease: 'power2.out', overwrite: 'auto' })
+  gsap.fromTo(lyricEl.value, { autoAlpha: 0, y: 7, filter: 'blur(4px)' }, { autoAlpha: 1, y: 0, filter: 'blur(0px)', duration: 0.45, ease: 'power2.out', overwrite: 'auto', clearProps: 'filter,transform' })
 })
 
 onBeforeUnmount(() => {
-  entrance?.kill()
   entrance?.kill()
   window.removeEventListener('resize', handleVolumeResize)
   if (volumeCloseTimer !== null) window.clearTimeout(volumeCloseTimer)
@@ -335,7 +336,8 @@ defineExpose({ enter })
   width: min(640px, calc(100vw - 48px));
   margin-inline: auto;
   display: grid;
-  grid-template-columns: 54px 260px minmax(0, 1fr);
+  /* 中列只放宽一点点给歌词，右列仍保持完整 */
+  grid-template-columns: 54px 276px minmax(0, 1fr);
   align-items: center;
   gap: 12px;
   padding: 10px 14px 10px 10px;
@@ -448,31 +450,35 @@ defineExpose({ enter })
   display: block;
   width: 100%;
   overflow: hidden;
-  color: var(--text-cream);
-  font-size: 12.5px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
+  color: var(--text-primary);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 单向无缝跑马灯：内容渲染两份并整体左移一半，滚完即回到起点，不折返 */
 .mini-title.scrolling {
-  display: inline-block;
-  width: auto;
+  display: inline-flex;
+  width: max-content;
   overflow: visible;
   text-overflow: clip;
-  animation: title-marquee var(--title-duration, 6s) ease-in-out 0.8s infinite alternate;
+  animation: title-marquee var(--title-duration, 8s) linear 0.8s infinite;
 }
-/* 暂停时歌名停在原处，没必要继续来回跑 */
+.title-seg { flex: none; padding-right: 30px; }
+/* 暂停时歌名停在原处，没必要继续跑 */
 .mini-title.held { animation-play-state: paused; }
 @keyframes title-marquee {
   from { transform: translateX(0); }
-  to { transform: translateX(var(--title-shift, 0px)); }
+  to { transform: translateX(-50%); }
 }
 .mini-artist {
   overflow: hidden;
-  color: #191722;
-  font-size: 9.5px;
-  letter-spacing: 0.1em;
+  color: var(--text-warm);
+  font-size: 11.5px;
+  font-weight: 500;
+  /* 小字号 + 亚像素字距会让笔画落在半像素上，中文看起来断断续续，这里收紧为 0 */
+  letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -500,13 +506,14 @@ defineExpose({ enter })
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.lyric-current { color: var(--amber); font-size: 11.5px; font-weight: 500; line-height: 1.45; letter-spacing: 0.04em; }
-.lyric-next { color: #191722; font-size: 9.5px; line-height: 1.45; letter-spacing: 0.03em; }
+/* 歌词固定深色，不再跟随平台强调色（网易云红 / 汽水绿）变化 */
+.lyric-current { color: var(--text-primary); font-size: 14px; font-weight: 600; line-height: 1.4; letter-spacing: 0; }
+.lyric-next { color: #191722; font-size: 11.5px; line-height: 1.4; letter-spacing: 0; opacity: 0.72; }
 
 /* ---- 进度与控制 ---- */
-.mini-right { position: relative; z-index: 1; display: grid; gap: 5px; }
-.mini-progress { display: flex; align-items: center; gap: 6px; padding-inline: 2px; }
-.mini-progress .mono { width: 34px; color: #191722; font-size: 12px; letter-spacing: 0; white-space: nowrap; }
+.mini-right { position: relative; z-index: 1; display: grid; gap: 3px; }
+.mini-progress { display: flex; align-items: center; gap: 4px; padding-inline: 2px; }
+.mini-progress .mono { width: 30px; color: #191722; font-size: 11px; letter-spacing: 0; white-space: nowrap; }
 .mini-progress .mono:last-of-type { text-align: right; }
 .progress-track {
   position: relative;
@@ -644,15 +651,15 @@ defineExpose({ enter })
 @media (max-width: 1180px) {
   .mini-player {
     width: min(620px, calc(100vw - 32px));
-    grid-template-columns: 48px 260px minmax(0, 1fr);
+    grid-template-columns: 48px 276px minmax(0, 1fr);
     gap: 10px;
     padding: 9px 12px 9px 9px;
   }
   .mini-meta { column-gap: 8px; }
   .mini-lyric { padding-left: 12px; }
   .mini-right { gap: 3px; min-width: 0; }
-  .mini-progress { gap: 6px; }
-  .mini-progress .mono { width: 34px; font-size: 12px; }
+  .mini-progress { gap: 4px; }
+  .mini-progress .mono { width: 30px; font-size: 11px; }
   .mini-controls { gap: 4px; }
   .ctl { width: 24px; height: 24px; }
   .ctl.play { width: 34px; height: 34px; margin: 0 1px; }

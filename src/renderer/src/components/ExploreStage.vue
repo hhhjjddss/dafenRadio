@@ -210,9 +210,14 @@
           </template>
           <Disc3 v-else :size="30" />
         </span>
-        <span class="void-kicker mono">{{ connected ? 'EMPTY SPACE' : 'NOT CONNECTED' }}</span>
-        <p>{{ connected ? '音乐空间暂时安静' : '还没有你的音乐' }}</p>
-        <small>{{ connected ? '去发现页搜一首喜欢的歌，它会留在收藏里' : platformKey === 'soda' ? '登录汽水音乐后，歌单、收藏与推荐会在这里铺开' : '连接网易云音乐或汽水音乐，歌单、收藏与推荐会在这里铺开' }}</small>
+        <template v-if="connected">
+          <span class="void-kicker mono">EMPTY SPACE</span>
+          <p>音乐空间暂时安静</p>
+        </template>
+        <span v-else class="void-link-off" role="img" aria-label="未连接音乐平台">
+          <Unplug :size="16" :stroke-width="1.8" />
+        </span>
+        <small v-if="connected || platformKey === 'soda'">{{ connected ? '去发现页搜一首喜欢的歌，它会留在收藏里' : '登录汽水音乐后，歌单、收藏与推荐会在这里铺开' }}</small>
         <button v-if="!connected" class="empty-cta" @click="emit('open-platform')">{{ platformKey === 'soda' ? '登录汽水音乐' : '选择音乐平台' }}</button>
       </div>
 
@@ -308,7 +313,7 @@ import type { MusicInfo } from '../composables/useNetease'
 import gsap from 'gsap'
 import { Draggable } from 'gsap/Draggable'
 import { InertiaPlugin } from 'gsap/InertiaPlugin'
-import { ArrowDownRight, ArrowUpRight, Circle, Disc3, Headphones, Heart, LayoutGrid, ListMusic, Music2, Radio, Rows3, Square } from '@lucide/vue'
+import { ArrowDownRight, ArrowUpRight, Circle, Disc3, Headphones, Heart, LayoutGrid, ListMusic, Music2, Radio, Rows3, Square, Unplug } from '@lucide/vue'
 import CollectionDetail from './CollectionDetail.vue'
 import { loadCover } from '../utils/cover'
 import neteaseLogo from '../assets/platforms/netease.png'
@@ -377,6 +382,8 @@ const emit = defineEmits<{
   (e: 'open-platform'): void
   (e: 'collection-open', name: string): void
   (e: 'collection-close'): void
+  (e: 'open-login'): void
+  (e: 'auth-error', message: string): void
 }>()
 
 function onCoverError(event: Event) {
@@ -897,7 +904,13 @@ async function expand(item: ExplorePlaylist) {
     activeTracks.value = result.data as MusicInfo[]
   } catch (error: any) {
     if (token !== openToken) return
-    trackError.value = error.message || '歌单读取失败'
+    const message = String(error?.message || '')
+    // 凭据失效交给父组件统一处理（清资料 + 过期提示），这里不再展示普通错误
+    if (/登录已失效|请先连接|请先登录/.test(message)) {
+      emit('auth-error', message)
+      return
+    }
+    trackError.value = message || '歌单读取失败'
   } finally {
     if (token === openToken) loadingTracks.value = false
   }
@@ -1579,6 +1592,22 @@ defineExpose({
   font-family: var(--font-mono);
   font-size: 9px;
   letter-spacing: 0.3em;
+}
+
+/* 未连接：用断开连接的图标替代 KICKER + 标题文案 */
+.void-link-off {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--text-muted);
+  box-shadow:
+    0 8px 18px rgba(70, 55, 110, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 /* 未连接 / 无数据：所有平台标识一起缓慢环绕 */

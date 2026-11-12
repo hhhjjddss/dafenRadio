@@ -12,8 +12,8 @@ if (process.platform === 'win32') {
   } catch {}
 }
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { beginNeteaseLogin, getNeteaseCollectionTracks, getNeteaseHeartbeat, getNeteaseLibrary, getNeteaseLikedSongs, getNeteaseLoginState, getNeteaseLyrics, getNeteasePersonalFm, getNeteaseSongUrl, hasNeteaseSession, logoutNetease, neteaseCacheDir, scrobbleNetease, searchNetease, searchNeteaseLyrics, setNeteaseLike, stopNeteaseApi } from './netease-api'
-import { beginSodaLogin, getSodaFeedTracks, getSodaLibrary, getSodaLoginState, getSodaLyrics, getSodaPlaylistTracks, getSodaRecommendations, getSodaSongUrl, hasSodaSession, logoutSoda, searchSodaPlaylists } from './soda-api'
+import { beginNeteaseLogin, getNeteaseCollectionTracks, getNeteaseHeartbeat, getNeteaseLibrary, getNeteaseLikedSongs, getNeteaseLoginState, getNeteaseLyrics, getNeteasePersonalFm, getNeteaseSessionInfo, getNeteaseSongUrl, hasNeteaseSession, logoutNetease, neteaseCacheDir, scrobbleNetease, searchNetease, searchNeteaseLyrics, setNeteaseLike, stopNeteaseApi } from './netease-api'
+import { beginSodaLogin, getSodaFeedTracks, getSodaLibrary, getSodaLoginState, getSodaLyrics, getSodaPlaylistTracks, getSodaRecommendations, getSodaSessionInfo, getSodaSongUrl, hasSodaSession, logoutSoda, searchSodaPlaylists } from './soda-api'
 import { closeAllSignerSessions, stopSignerAssets } from './soda-signer'
 import { searchOnlineLyrics } from './lyrics'
 
@@ -767,6 +767,7 @@ app.whenReady().then(() => {
     }
   })
   ipcMain.handle('netease:configured', async () => ({ success: true, data: await hasNeteaseSession() }))
+  ipcMain.handle('netease:sessionInfo', async () => ({ success: true, data: await getNeteaseSessionInfo() }))
   ipcMain.handle('netease:loginQr', async () => {
     try { return { success: true, data: await beginNeteaseLogin() } }
     catch (error: any) { return { success: false, error: error.message } }
@@ -799,6 +800,7 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('soda:loginState', () => ({ success: true, data: getSodaLoginState() }))
   ipcMain.handle('soda:configured', () => ({ success: true, data: hasSodaSession() }))
+  ipcMain.handle('soda:sessionInfo', async () => ({ success: true, data: await getSodaSessionInfo() }))
   ipcMain.handle('soda:logout', () => {
     try { logoutSoda(); return { success: true } }
     catch (error: any) { return { success: false, error: error.message } }

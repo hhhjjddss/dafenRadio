@@ -13,8 +13,12 @@ netease-cache/
 # 本机用户数据
 data/
 
-# 登录会话凭据
+# 登录会话凭据 / 退出标记
 *-session.bin
+*-session.logged-out
+
+# TypeScript 增量编译缓存
+*.tsbuildinfo
 
 # 环境变量
 *.local

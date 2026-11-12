@@ -82,6 +82,16 @@ async function request(path: string, options: RequestOptions = {}): Promise<Requ
     if (!response.ok) throw new Error(`汽水接口请求失败（HTTP ${response.status}）`)
     let body: any = null
     try { body = text ? JSON.parse(text) : null } catch { body = null }
+    // 汽水凭据失效时仍返回 HTTP 200，只在 body 里给 status_code；
+    // 不在这里拦下，界面就会把空资料当成「已登录但没有等级」
+    const bizCode = Number(body?.status_code ?? 0)
+    if (bizCode !== 0) {
+      const statusMsg = String(body?.status_info?.status_msg || body?.message || '')
+      if (/登录.*(失效|过期|重新登录)|未登录|请先登录/.test(statusMsg)) {
+        throw new Error('汽水登录已失效，请重新登录')
+      }
+      throw new Error(statusMsg || `汽水接口返回异常（code ${bizCode}）`)
+    }
     return { body, headers: response.headers, status: response.status, text }
   } catch (error: any) {
     if (error?.name === 'AbortError') throw new Error('汽水接口请求超时')
@@ -231,6 +241,24 @@ function withSession(headers: Record<string, string>) {
 export function hasSodaSession() {
   loadSodaSession()
   return Boolean(sodaCookie)
+}
+
+// 校验真实登录态：凭据过期时让界面明确提示重新登录，而不是把空资料当成缓存问题。
+// 网络异常时保守保留登录态，避免一次断网就把账号踢掉。
+export async function getSodaSessionInfo(): Promise<{ connected: boolean; expired: boolean }> {
+  loadSodaSession()
+  if (!sodaCookie) return { connected: false, expired: false }
+  try {
+    await requestJson(`${PC_API}/luna/pc/me`, {
+      headers: { ...PC_HEADERS, Cookie: requireSodaSession() },
+      query: { aid: PASSPORT.aid }
+    })
+    return { connected: true, expired: false }
+  } catch (error: any) {
+    if (String(error?.message || '').includes('登录已失效')) return { connected: false, expired: true }
+    console.warn('[汽水] 登录状态校验失败，保留已保存的登录态:', error?.message || error)
+    return { connected: true, expired: false }
+  }
 }
 
 /* ============ 扫码登录：轮询放主进程，浮层关掉也不丢确认 ============ */
@@ -671,7 +699,8 @@ export async function getSodaRecommendations(limit = 50, force = false) {
   loadSodaSession()
   // 探索推荐只对登录账号开放，避免匿名设备拉到不属于用户的公共内容
   if (!sodaCookie) throw new Error('请先登录汽水音乐')
-  const sessionKey = 'user'
+  // 缓存按凭据指纹区分，换账号后不会先闪出上一个账号的推荐
+  const sessionKey = createHash('sha1').update(sodaCookie).digest('hex').slice(0, 12)
   if (!force && recommendCache && recommendCache.session === sessionKey &&
       recommendCache.value.length >= limit && Date.now() - recommendCache.at < 5 * 60_000) {
     return recommendCache.value.slice(0, limit)

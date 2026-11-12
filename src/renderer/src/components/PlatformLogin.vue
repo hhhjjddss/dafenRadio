@@ -5,7 +5,7 @@
         <img class="login-logo" :src="brandLogo" alt="" />
         <div class="login-title">
           <h2>{{ brandName }}</h2>
-          <span class="status-pill" :class="{ online: loggedIn }"><i></i>{{ loggedIn ? '已连接' : busy ? '连接中' : '未连接' }}</span>
+          <span class="status-pill" :class="{ online: loggedIn }"><i></i>{{ loggedIn ? '已连接' : expired ? '登录已过期' : busy ? '连接中' : '未连接' }}</span>
         </div>
         <button class="login-close" aria-label="关闭账号" @click="emit('close')"><X :size="15" /></button>
       </header>
@@ -15,9 +15,9 @@
           <img class="hero-watermark" :src="brandLogo" alt="" aria-hidden="true" />
           <span class="login-aurora" aria-hidden="true"></span>
           <div class="login-copy">
-            <span class="step-label mono">{{ syncing ? 'SYNCING' : loggedIn ? 'CONNECTED' : error ? 'TRY AGAIN' : phase === 'scanned' ? 'CONFIRM ON PHONE' : qrImage ? 'SCAN TO SIGN IN' : 'SECURE SIGN IN' }}</span>
-            <h3>{{ syncing ? '正在同步音乐空间' : loggedIn ? '账号已就绪' : error ? '二维码暂时不可用' : phase === 'scanned' ? '请在手机上确认登录' : qrImage ? scanTitle : `登录${brandName}` }}</h3>
-            <p>{{ syncing ? '登录成功，正在整理你的歌单与收藏…' : loggedIn ? '登录凭据已安全保存在这台设备。' : error ? errorHint : phase === 'scanned' ? (loginMessage || '已扫码，请在手机上确认登录') : qrImage ? (loginMessage || scanHint) : idleHint }}</p>
+            <span class="step-label mono">{{ syncing ? 'SYNCING' : loggedIn ? 'CONNECTED' : expired ? 'SESSION EXPIRED' : error ? 'TRY AGAIN' : scanned ? 'CONFIRM ON PHONE' : qrImage ? 'SCAN TO SIGN IN' : 'SECURE SIGN IN' }}</span>
+            <h3>{{ syncing ? '正在同步音乐空间' : loggedIn ? '账号已就绪' : expired ? '登录状态已过期' : error ? '二维码暂时不可用' : scanned ? '请在手机上确认登录' : qrImage ? scanTitle : `登录${brandName}` }}</h3>
+            <p>{{ syncing ? '登录成功，正在整理你的歌单与收藏…' : loggedIn ? '登录凭据已安全保存在这台设备，失效时会明确提示重新登录。' : expired ? '保存的登录凭据已失效，重新扫码即可恢复歌单与收藏。' : error ? errorHint : scanned ? (loginMessage || '已扫码，请在手机上确认登录') : qrImage ? (loginMessage || scanHint) : idleHint }}</p>
             <p v-if="error" class="login-error" role="alert"><AlertCircle :size="13" /><span>{{ error }}</span></p>
             <div class="login-actions">
               <button v-if="!loggedIn" class="text-action" :disabled="busy" @click="startLogin">
@@ -47,6 +47,10 @@
               <span class="qr-check"><Check :size="20" /></span>
               <small>已安全连接</small>
             </div>
+            <div v-else-if="expired" class="qr-state">
+              <span class="qr-fail"><AlertCircle :size="20" /></span>
+              <small>登录已过期</small>
+            </div>
             <div v-else-if="busy" class="qr-state">
               <span class="qr-spinner"></span>
               <small>正在获取二维码</small>
@@ -63,14 +67,19 @@
         </div>
 
         <div class="verify-flow" aria-label="登录流程">
-          <div class="flow-step" :class="{ done: qrImage || loggedIn, active: busy && !qrImage }">
+          <div class="flow-step" :class="{ done: qrImage || scanned || loggedIn, active: busy && !qrImage }">
             <span class="flow-icon"><QrCode :size="14" /></span>
-            <div class="flow-copy"><strong>获取二维码</strong><small>{{ qrImage || loggedIn ? '已生成' : busy ? '正在获取' : '准备扫码' }}</small></div>
+            <div class="flow-copy"><strong>获取二维码</strong><small>{{ qrImage || scanned || loggedIn ? '已生成' : busy ? '正在获取' : '准备扫码' }}</small></div>
           </div>
-          <span class="flow-link" :class="{ lit: qrImage || loggedIn, flowing: !!qrImage && !loggedIn }"></span>
-          <div class="flow-step" :class="{ done: loggedIn, active: !loggedIn && !!qrImage }">
+          <span class="flow-link" :class="{ lit: qrImage || scanned || loggedIn, flowing: !!qrImage && !scanned && !loggedIn }"></span>
+          <div class="flow-step" :class="{ done: scanned || loggedIn }">
+            <span class="flow-icon"><ScanLine :size="14" /></span>
+            <div class="flow-copy"><strong>扫码成功</strong><small>{{ scanned || loggedIn ? '已扫码' : '手机扫码' }}</small></div>
+          </div>
+          <span class="flow-link" :class="{ lit: scanned || loggedIn, flowing: scanned && !loggedIn }"></span>
+          <div class="flow-step" :class="{ done: loggedIn, active: scanned && !loggedIn }">
             <span class="flow-icon"><Smartphone :size="14" /></span>
-            <div class="flow-copy"><strong>手机确认</strong><small>{{ loggedIn ? '已确认' : phase === 'scanned' ? '请在手机上确认' : qrImage ? '等待手机确认' : '在手机端确认' }}</small></div>
+            <div class="flow-copy"><strong>手机确认</strong><small>{{ loggedIn ? '已确认' : scanned ? '请在手机上确认' : qrImage ? '等待手机确认' : '在手机端确认' }}</small></div>
           </div>
           <span class="flow-link" :class="{ lit: loggedIn, flowing: loggedIn && syncing }"></span>
           <div class="flow-step" :class="{ done: loggedIn && !syncing, active: loggedIn && syncing }">
@@ -86,13 +95,13 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { AlertCircle, ArrowRight, Check, Disc3, ExternalLink, LogOut, QrCode, RefreshCw, Smartphone, X } from '@lucide/vue'
+import { AlertCircle, ArrowRight, Check, Disc3, ExternalLink, LogOut, QrCode, RefreshCw, ScanLine, Smartphone, X } from '@lucide/vue'
 import neteaseLogo from '../assets/platforms/netease.png'
 import sodaLogo from '../assets/platforms/soda.png'
 
 const props = defineProps<{ syncing?: boolean; platform?: 'netease' | 'soda' }>()
 
-const emit = defineEmits<{ close: []; 'logged-out': [platform: 'netease' | 'soda'] }>()
+const emit = defineEmits<{ close: []; 'logged-out': [platform: 'netease' | 'soda']; expired: [] }>()
 
 const isSoda = computed(() => props.platform === 'soda')
 const brandName = computed(() => isSoda.value ? '汽水音乐' : '网易云音乐')
@@ -105,12 +114,15 @@ const idleHint = computed(() => isSoda.value
   ? '登录后同步你在汽水的歌单与收藏；不登录也可以浏览推荐与试听。'
   : '登录后同步歌单、收藏与每日推荐；不登录也可以直接搜索试听。')
 const loggedIn = ref(false)
+const expired = ref(false)
 const loggingOut = ref(false)
 const qrImage = ref('')
 const busy = ref(false)
 const error = ref('')
 const loginMessage = ref('')
 const phase = ref('')
+// 主进程轮询到的「已扫码、待确认」阶段
+const scanned = computed(() => phase.value === 'scanned')
 // 主进程负责 5 秒软冷却与继续轮询；这里只做文案区分，不再自己停掉自动刷新
 function isRateLimitedText(text: string) {
   return /频繁|风控|受限|rate\s*limit|too\s*many|429/i.test(text)
@@ -137,6 +149,7 @@ function applyLoginState(state: any) {
     clearBusyTimer()
     busy.value = false
     loggedIn.value = true
+    expired.value = false
     qrImage.value = ''
     loginMessage.value = state.message || '扫码成功，正在同步歌单…'
     error.value = ''
@@ -199,6 +212,7 @@ async function startLogin() {
   qrImage.value = ''
   loginMessage.value = '等待扫码确认…'
   loggedIn.value = false
+  expired.value = false
   phase.value = 'waiting'
   clearBusyTimer()
   // 主进程取码最长可能卡在服务启动上：到点先放开按钮，避免刷新按钮一直不可用
@@ -243,6 +257,7 @@ async function logout() {
     if (!result?.success) throw new Error(result?.error || '退出登录失败')
     clearBusyTimer()
     loggedIn.value = false
+    expired.value = false
     busy.value = false
     qrImage.value = ''
     loginMessage.value = ''
@@ -263,13 +278,19 @@ onMounted(async () => {
     if (!disposed) applyLoginState(state)
   }) ?? null
   try {
-    const result = isSoda.value ? await window.api.sodaConfigured() : await window.api.neteaseConfigured()
+    // 校验真实登录态：凭据过期时明确显示「登录已过期」，而不是笼统的未连接
+    const result = isSoda.value ? await window.api.sodaSessionInfo() : await window.api.neteaseSessionInfo()
     if (disposed) return
-    loggedIn.value = Boolean(result.data)
+    loggedIn.value = Boolean(result?.data?.connected)
+    expired.value = Boolean(result?.data?.expired)
+    // 弹层先发现了过期也要回传给主界面，否则背后的账号资料还显示为已连接
+    if (expired.value) emit('expired')
   } catch {
     loggedIn.value = false
   }
-  if (loggedIn.value || disposed) return
+  // 凭据已过期时停在「登录已过期」，由用户点刷新二维码再取新码；
+  // 否则自动取码会把过期提示盖掉，看起来像从没登录过
+  if (loggedIn.value || expired.value || disposed) return
   let state: any = null
   try {
     const result = isSoda.value ? await window.api.sodaLoginState() : await window.api.neteaseLoginState()
@@ -464,13 +485,13 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 30px;
-  padding: 0 12px;
+  height: 32px;
+  padding: 0 14px;
   border: 1px solid rgba(70, 55, 110, 0.12);
   border-radius: var(--r-full);
   background: rgba(255, 255, 255, 0.72);
   color: #191722;
-  font-size: 10.5px;
+  font-size: 12.5px;
   transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
 }
 .text-action:hover:not(:disabled) { border-color: var(--login-accent-line); background: #fff; color: var(--login-accent-deep); }
