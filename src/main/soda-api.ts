@@ -6,7 +6,16 @@ import { is } from '@electron-toolkit/utils'
 import { join } from 'path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync } from 'fs'
 import { createHash, randomBytes, randomUUID } from 'crypto'
-import { closeSignerSession, signerCookies, signerRequest } from './soda-signer'
+import {
+  ackSecondVerify,
+  closeSignerSession,
+  getSecondVerifyDecision,
+  isSecondVerifyDone,
+  openSignerVerifyWindow,
+  registerSecondVerify,
+  signerCookies,
+  signerRequest
+} from './soda-signer'
 
 const LUNA_API = 'https://beta-luna.douyin.com'
 const PC_API = 'https://api.qishui.com'
@@ -292,6 +301,7 @@ interface SodaQrSession {
   verifyPortraitId: string
   expireAt: number
   cooldownUntil: number
+  verifyAttempts?: number
 }
 
 let sodaQrSession: SodaQrSession | null = null
@@ -325,6 +335,53 @@ function failSodaLogin(phase: SodaLoginPhase, message: string) {
   sodaLoginLastSignal = ''
   if (session) closeSignerSession(session.key)
   publishSodaLoginState({ phase, qrImage: '', message: '', error: message })
+}
+
+// 二次验证组件需要的公共参数快照（对象形态，对齐参考实现的 commonParams）。
+function sodaGeneralParamsObject(session: SodaQrSession): Record<string, string> {
+  const params = sodaCommonParams(session, randomHex(8))
+  const obj: Record<string, string> = {}
+  params.forEach((value, key) => { obj[key] = value })
+  return obj
+}
+
+// 归一化 2046 决策里的 biz_params：JSON 字符串 / k=v 查询串 / 对象都归成键值对列表，
+// 嵌套对象序列化成 JSON 文本，null 丢弃（对齐参考实现的 normalizeBizParams）。
+function normalizeBizParams(value: any): Array<[string, string]> {
+  if (value === null || value === undefined) return []
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (!text) return []
+    try {
+      const parsed = JSON.parse(text)
+      return normalizeBizParams(parsed)
+    } catch {
+      // 退路：按查询串解析
+    }
+    return text.split('&').map(pair => {
+      const eq = pair.indexOf('=')
+      if (eq <= 0) return null
+      let key = pair.slice(0, eq)
+      let val = pair.slice(eq + 1)
+      try { key = decodeURIComponent(key) } catch { /* 保持原样 */ }
+      try { val = decodeURIComponent(val) } catch { /* 保持原样 */ }
+      return [key, val] as [string, string]
+    }).filter((x): x is [string, string] => !!x && !!x[0])
+  }
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return Object.entries(value)
+      .filter(([, v]) => v !== null && v !== undefined)
+      .map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)] as [string, string])
+  }
+  return []
+}
+
+// 打开二次验证窗口：登记决策后加载 security_host.html（官方组件经 /verify/* 桥接）。
+function openSodaVerifyWindow(key: string, seq: number) {
+  void openSignerVerifyWindow(key, () => {
+    sodaLoginFailures = 0
+    scheduleSodaLoginPoll(seq)
+  })
 }
 
 function createQrSession(): SodaQrSession {
@@ -444,16 +501,39 @@ async function pollSodaLogin(seq: number) {
     scheduleSodaLoginPoll(seq, session.cooldownUntil - now)
     return
   }
+  // 二次验证窗口已完成：带决策里的 biz_params 重发确认（isResend=true）
+  if (isSecondVerifyDone(session.key)) {
+    ackSecondVerify(session.key)
+    await checkSodaLogin(seq, session, true)
+    return
+  }
+  await checkSodaLogin(seq, session, false)
+}
+
+async function checkSodaLogin(seq: number, session: SodaQrSession, resend: boolean) {
   try {
-    const body = new URLSearchParams({
+    const bodyParams: Record<string, string> = {
       need_logo: 'false',
       need_short_url: 'false',
       is_frontier: 'true',
       token: session.token,
       is_new_login: '1',
       next: PC_API
-    }).toString()
-    const { response, envelope } = await passportRequest(session, 'POST', '/passport/web/check_qrconnect/', {}, body)
+    }
+    if (resend) {
+      const decision = getSecondVerifyDecision(session.key) || {}
+      for (const [key, value] of normalizeBizParams(decision.biz_params)) {
+        if (!(key in bodyParams)) bodyParams[key] = value
+      }
+    }
+    const body = new URLSearchParams(bodyParams).toString()
+    const { response, envelope } = await passportRequest(
+      session,
+      'POST',
+      '/passport/web/check_qrconnect/',
+      resend ? { isResend: 'true' } : {},
+      body
+    )
     if (seq !== sodaLoginSeq || sodaQrSession !== session) return
     const data = envelope.data || {}
     const status = String(data.status ?? '').toLowerCase()
@@ -468,8 +548,21 @@ async function pollSodaLogin(seq: number) {
     const confirmed = status === '3' || status === 'confirmed' || status === 'success' ||
       data.logged_in === true || Boolean(data.session_cookie)
 
-    // 2046：官方二次验证组件才能闭环；当前 Electron 会话没有验证窗口，明确告知而不是反复重试
+    // 2046：护照要求二次安全验证。把决策登记到桥接表，加载 security_host.html 跑官方
+    // ucWebSecondVerify 组件，组件网络请求经 /verify/request 回签名页上下文代发
+    // （带 cookie + a_bogus），完成后自动关窗恢复轮询。
     if (errorCode === 2046) {
+      session.verifyAttempts = (session.verifyAttempts || 0) + 1
+      console.warn('[汽水] 扫码轮询触发二次验证(2046) 决策字段:', Object.keys(data).join(','))
+      if (session.verifyAttempts <= 3) {
+        registerSecondVerify(session.key, data, sodaGeneralParamsObject(session))
+        publishSodaLoginState({
+          phase: 'scanned',
+          message: '汽水要求二次安全验证，请在弹出的窗口完成验证，完成后登录会自动继续'
+        })
+        openSodaVerifyWindow(session.key, seq)
+        return
+      }
       failSodaLogin('error', '汽水要求二次安全验证，请改用汽水音乐官方客户端登录后再试')
       return
     }
@@ -563,6 +656,54 @@ async function pollSodaLogin(seq: number) {
   }
 }
 
+// 取一次二维码；遇到 2046 风控时在验证窗口闭环后用同一会话重试（递归，次数受 verifyAttempts 限制）
+async function fetchQrcode(seq: number, session: SodaQrSession): Promise<{ token: string; qrImage: string; expireAt: number }> {
+  const { response, envelope } = await passportRequest(session, 'GET', '/passport/web/get_qrcode/', {
+    next: PC_API,
+    need_logo: 'false',
+    need_short_url: 'false',
+    is_new_login: '1'
+  })
+  if (seq !== sodaLoginSeq) throw new Error('登录二维码已刷新，请使用最新的二维码')
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`汽水接口请求失败（HTTP ${response.status}）`)
+  }
+  const data = envelope.data || {}
+  const token = String(data.token || '')
+  const qrImage = String(data.qrcode || '')
+  const errorCode = Number(data.error_code || 0)
+  if (envelope.message !== 'success' || errorCode !== 0 || !token || !qrImage.startsWith('data:image/')) {
+    // 护照风控（2046）：把决策登记到桥接表并加载 security_host.html 跑官方组件，
+    // 完成后自动关窗，再用同一会话重试取码
+    if (errorCode === 2046) {
+      session.verifyAttempts = (session.verifyAttempts || 0) + 1
+      console.warn('[汽水] 获取二维码触发二次验证(2046) 决策字段:', Object.keys(data).join(','))
+      if (session.verifyAttempts <= 3) {
+        registerSecondVerify(session.key, data, sodaGeneralParamsObject(session))
+        publishSodaLoginState({
+          phase: 'waiting',
+          qrImage: '',
+          message: '汽水要求二次安全验证，请在弹出的窗口完成验证，完成后登录会自动重试',
+          error: ''
+        })
+        return await new Promise((resolve, reject) => {
+          openSignerVerifyWindow(session.key, () => {
+            sodaLoginFailures = 0
+            void fetchQrcode(seq, session).then(resolve).catch(reject)
+          })
+        })
+      }
+    }
+    throw new Error(String(data.description || envelope.message || '汽水没有返回可用的二维码'))
+  }
+  // 二维码图片本身就是服务端下发的 qrcode_index_url；不要改写成 light/invoke/scan_login，
+  // 实测改写版手机点确认后服务端永远停在 scanned。
+  if (!String(data.qrcode_index_url || '').includes('token=')) {
+    console.warn('[汽水] 服务端没有下发官方扫码地址，仍使用返回的二维码图片')
+  }
+  return { token, qrImage, expireAt: Number(data.expire_time || 0) * 1000 || Date.now() + 3 * 60_000 }
+}
+
 export async function beginSodaLogin() {
   const seq = ++sodaLoginSeq
   stopSodaLoginPoll()
@@ -575,34 +716,16 @@ export async function beginSodaLogin() {
   const session = createQrSession()
   sodaQrSession = session
   try {
-    const { response, envelope } = await passportRequest(session, 'GET', '/passport/web/get_qrcode/', {
-      next: PC_API,
-      need_logo: 'false',
-      need_short_url: 'false',
-      is_new_login: '1'
-    })
+    const result = await fetchQrcode(seq, session)
     if (seq !== sodaLoginSeq) throw new Error('登录二维码已刷新，请使用最新的二维码')
-    if (response.status < 200 || response.status >= 300) {
-      throw new Error(`汽水接口请求失败（HTTP ${response.status}）`)
-    }
-    const data = envelope.data || {}
-    const token = String(data.token || '')
-    const qrImage = String(data.qrcode || '')
-    if (envelope.message !== 'success' || Number(data.error_code || 0) !== 0 || !token || !qrImage.startsWith('data:image/')) {
-      throw new Error(String(data.description || envelope.message || '汽水没有返回可用的二维码'))
-    }
-    // 二维码图片本身就是服务端下发的 qrcode_index_url；不要改写成 light/invoke/scan_login，
-    // 实测改写版手机点确认后服务端永远停在 scanned。
-    if (!String(data.qrcode_index_url || '').includes('token=')) {
-      console.warn('[汽水] 服务端没有下发官方扫码地址，仍使用返回的二维码图片')
-    }
-    session.token = token
-    session.expireAt = Number(data.expire_time || 0) * 1000 || Date.now() + 3 * 60_000
-    publishSodaLoginState({ phase: 'waiting', qrImage, message: '等待手机扫码…', error: '' })
+    session.token = result.token
+    session.expireAt = result.expireAt
+    publishSodaLoginState({ phase: 'waiting', qrImage: result.qrImage, message: '等待手机扫码…', error: '' })
     scheduleSodaLoginPoll(seq)
-    return { qrImage, expireAt: session.expireAt }
+    return { qrImage: result.qrImage, expireAt: session.expireAt }
   } catch (error: any) {
     const errorText = String(error?.message || '') || '获取二维码失败'
+    console.warn('[汽水] 获取二维码失败:', errorText)
     if (seq === sodaLoginSeq) failSodaLogin('error', errorText)
     throw new Error(errorText)
   }

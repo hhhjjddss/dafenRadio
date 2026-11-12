@@ -206,6 +206,7 @@ function applyLoginState(state: any) {
 
 async function startLogin() {
   if (busy.value) return
+  console.info(`[登录] ${brandName.value} 开始获取二维码 (platform=${props.platform})`)
   const token = ++attempt
   busy.value = true
   error.value = ''
@@ -232,7 +233,9 @@ async function startLogin() {
     qrImage.value = image
     loginMessage.value = '等待手机扫码…'
     phase.value = 'waiting'
+    console.info(`[登录] ${brandName.value} 二维码已拿到`)
   } catch (reason: any) {
+    console.error(`[登录] ${brandName.value} 取码失败:`, reason?.message || reason)
     if (disposed || token !== attempt) return
     loginMessage.value = ''
     error.value = reason.message || '获取二维码失败，请稍后重试。'

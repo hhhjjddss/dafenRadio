@@ -7,7 +7,7 @@
  * 用完即关，避免设备身份复用触发限流。 */
 
 import { app, BrowserWindow, session } from 'electron'
-import { createServer, type Server } from 'http'
+import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 
@@ -42,12 +42,46 @@ let assetServer: Server | null = null
 let assetPort = 0
 let serverStarting: Promise<number> | null = null
 
+// 二次验证（error_code=2046）桥接登记表：验证窗口里的官方组件通过 /verify/* 与本进程交互。
+// 决策（2046 响应 data）与公共参数登记在这里，验证窗口加载 security_host.html 时经
+// /verify/start 领取；组件内的网络请求经 /verify/request 路由回签名页上下文代发；
+// /verify/complete 置完成标志，扫码轮询侧据此带 biz_params 重发 check_qrconnect。
+const verifyDecisions = new Map<string, { decision: any; generalParams: Record<string, string> }>()
+const verifyDoneFlags = new Set<string>()
+
+export function registerSecondVerify(key: string, decision: any, generalParams: Record<string, string>) {
+  verifyDecisions.set(key, { decision, generalParams })
+  verifyDoneFlags.delete(key)
+}
+
+export function isSecondVerifyDone(key: string) {
+  return verifyDoneFlags.has(key)
+}
+
+export function ackSecondVerify(key: string) {
+  verifyDoneFlags.delete(key)
+}
+
+export function getSecondVerifyDecision(key: string) {
+  return verifyDecisions.get(key)?.decision ?? null
+}
+
+export function clearSecondVerify(key: string) {
+  verifyDecisions.delete(key)
+  verifyDoneFlags.delete(key)
+}
+
 function serveAssets(): Promise<number> {
   if (assetPort) return Promise.resolve(assetPort)
   if (serverStarting) return serverStarting
   serverStarting = new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
-      const name = decodeURIComponent((req.url || '/').split('?')[0]).replace(/^\/+/, '') || 'security_host.html'
+      const pathname = decodeURIComponent((req.url || '/').split('?')[0])
+      if ((req.method || 'GET').toUpperCase() === 'POST' && pathname.startsWith('/verify/')) {
+        void handleVerifyBridge(pathname, req, res)
+        return
+      }
+      const name = pathname.replace(/^\/+/, '') || 'security_host.html'
       if (!ASSETS.has(name)) {
         res.writeHead(404)
         res.end('not found')
@@ -78,6 +112,65 @@ function serveAssets(): Promise<number> {
     })
   })
   return serverStarting
+}
+
+function readJsonBody(req: IncomingMessage): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let raw = ''
+    req.on('data', chunk => {
+      raw += chunk
+      if (raw.length > 1_000_000) req.destroy(new Error('请求体过大'))
+    })
+    req.on('end', () => {
+      try { resolve(raw ? JSON.parse(raw) : {}) } catch (error) { reject(error) }
+    })
+    req.on('error', reject)
+  })
+}
+
+// 二次验证桥接：验证窗口里的官方组件（security_host.html?key=...）只与本进程通信，
+// 真正的网络请求由本进程转发到该二维码的签名页上下文（带登录 cookie + a_bogus）。
+async function handleVerifyBridge(pathname: string, req: IncomingMessage, res: ServerResponse) {
+  const send = (status: number, payload: unknown) => {
+    if (res.headersSent) return
+    res.writeHead(status, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store'
+    })
+    res.end(JSON.stringify(payload))
+  }
+  try {
+    const body = await readJsonBody(req)
+    const key = String(body?.key || '')
+    if (!key) return send(400, { success: false, error: '缺少验证会话 key' })
+
+    if (pathname === '/verify/start') {
+      const entry = verifyDecisions.get(key)
+      if (!entry) return send(404, { success: false, error: '二次验证决策不存在或已过期' })
+      return send(200, { success: true, data: { decision: entry.decision, generalParams: entry.generalParams } })
+    }
+
+    if (pathname === '/verify/request') {
+      const request = body?.request
+      if (!request || typeof request.url !== 'string' || typeof request.method !== 'string') {
+        return send(400, { success: false, error: '缺少请求参数' })
+      }
+      const result = await signerRequest(key, request)
+      return send(200, result)
+    }
+
+    if (pathname === '/verify/complete') {
+      verifyDoneFlags.add(key)
+      // 验证完成自动关窗，触发 onClosed -> 恢复扫码轮询并带 biz_params 重发确认
+      if (verifyWindow && !verifyWindow.isDestroyed() && verifyWindowKey === key) verifyWindow.close()
+      return send(200, { success: true })
+    }
+
+    return send(404, { success: false, error: '未知的验证桥接端点' })
+  } catch (error) {
+    send(500, { success: false, error: String((error as any)?.message || error) })
+  }
 }
 
 async function createSession(key: string): Promise<SignerSession> {
@@ -199,7 +292,63 @@ export function closeSignerSession(key: string) {
   closeSession(key)
 }
 
+/* 护照风控（error_code=2046）要求二次安全验证：官方验证组件必须在浏览器里完成。
+   在与签名会话相同的 partition 里弹出可见窗口，加载 security_host.html?key=...&bridgeRoot=/verify，
+   组件通过 /verify/request 把网络请求路由回签名页上下文代发（带 cookie + a_bogus）。
+   验证完成后自动关窗（closed -> finish -> 恢复扫码轮询）。 */
+let verifyWindow: BrowserWindow | null = null
+let verifyWindowKey = ''
+
+export async function openSignerVerifyWindow(key: string, onClosed: () => void) {
+  if (verifyWindow && !verifyWindow.isDestroyed() && verifyWindowKey === key) return
+  if (verifyWindow && !verifyWindow.isDestroyed()) verifyWindow.destroy()
+  const port = await serveAssets()
+  const url = `http://127.0.0.1:${port}/security_host.html?key=${encodeURIComponent(key)}&bridgeRoot=/verify`
+  const win = new BrowserWindow({
+    width: 520,
+    height: 740,
+    title: '汽水安全验证（完成验证后请关闭本窗口）',
+    autoHideMenuBar: true,
+    webPreferences: {
+      partition: `soda-login-${key}`,
+      sandbox: false
+    }
+  })
+  verifyWindow = win
+  verifyWindowKey = key
+  win.setMenuBarVisibility(false)
+  // 官方验证组件按浏览器环境渲染，换标准 Chrome UA 避免白屏/风控拒绝
+  const chromeUA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  win.webContents.setUserAgent(chromeUA)
+  // 开发模式下附带打开该窗口自己的 DevTools，白屏时能看到页面内部的报错
+  if (!app.isPackaged) win.webContents.openDevTools({ mode: 'detach' })
+  let settled = false
+  const finish = () => {
+    if (settled) return
+    settled = true
+    if (verifyWindow === win) {
+      verifyWindow = null
+      verifyWindowKey = ''
+    }
+    if (!win.isDestroyed()) win.destroy()
+    onClosed()
+  }
+  win.on('closed', () => {
+    if (verifyWindow === win) {
+      verifyWindow = null
+      verifyWindowKey = ''
+    }
+    finish()
+  })
+  // 加载失败不直接销毁窗口：保留错误页让用户看到原因，手动关闭后仍会恢复轮询
+  win.loadURL(url).catch(error => {
+    console.warn('[汽水] 验证窗口加载失败:', String(error))
+  })
+}
+
 function closeSession(key: string) {
+  clearSecondVerify(key)
   const entry = sessions.get(key)
   if (!entry) return
   sessions.delete(key)
@@ -207,7 +356,12 @@ function closeSession(key: string) {
 }
 
 export function closeAllSignerSessions() {
+  verifyDecisions.clear()
+  verifyDoneFlags.clear()
   for (const key of [...sessions.keys()]) closeSession(key)
+  if (verifyWindow && !verifyWindow.isDestroyed()) verifyWindow.destroy()
+  verifyWindow = null
+  verifyWindowKey = ''
 }
 
 export function stopSignerAssets() {

@@ -796,7 +796,10 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('soda:loginQr', async () => {
     try { return { success: true, data: await beginSodaLogin() } }
-    catch (error: any) { return { success: false, error: error.message } }
+    catch (error: any) {
+      console.warn('[汽水] 登录接口 soda:loginQr 失败:', String(error?.message || error))
+      return { success: false, error: error.message }
+    }
   })
   ipcMain.handle('soda:loginState', () => ({ success: true, data: getSodaLoginState() }))
   ipcMain.handle('soda:configured', () => ({ success: true, data: hasSodaSession() }))
