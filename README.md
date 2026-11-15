@@ -13,11 +13,11 @@
 
 采用液态玻璃设计语言，光影随封面流动，视觉沉浸。
 
-![1793595508072.png](https://picui.ogmua.cn/s1/2026/11/02/6ae8187d7b34f.webp)
+![](https://p.sda1.dev/36/2b8f373cff845c932ed04f60880e37a1/image.png)
 
- ![1793595681776.png](https://picui.ogmua.cn/s1/2026/11/02/6ae81924c255c.webp)
+![](https://p.sda1.dev/36/9ccb4466ec44633ec9a0787aad39ee03/image.png)
 
- ![1793595767420.png](https://picui.ogmua.cn/s1/2026/11/02/6ae8197a690b6.webp)  
+ ![](https://p.sda1.dev/36/81d21d8f5d90b0f752c49c4fd6f3027d/image.png)
 
 ###   探索画布
 
