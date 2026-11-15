@@ -45,8 +45,10 @@
               >
                 <span class="node-cover">
                   <img v-if="card.item.cover" :src="wallCover(card.item.cover)" alt="" loading="lazy" decoding="async" draggable="false" @error="onCoverError" />
-                  <span v-else-if="card.favorite" class="cover-fallback liked-fallback"><Heart :size="30" /></span>
+                  <span v-else-if="card.favorite || card.liked" class="cover-fallback liked-fallback"><Heart :size="30" /></span>
                   <img v-else :src="fallbackCover" alt="" loading="lazy" decoding="async" draggable="false" />
+                  <span v-if="card.liked && card.item.cover" class="liked-badge" aria-hidden="true"><Heart :size="11" fill="currentColor" /></span>
+                  <span v-if="card.mine" class="mine-badge mono" aria-hidden="true">MINE</span>
                 </span>
               </button>
             </div>
@@ -118,8 +120,10 @@
                     >
                       <span class="node-cover">
                         <img v-if="card.item.cover" :src="wallCover(card.item.cover)" alt="" loading="lazy" decoding="async" draggable="false" @error="onCoverError" />
-                        <span v-else-if="card.favorite" class="cover-fallback liked-fallback"><Heart :size="30" /></span>
+                        <span v-else-if="card.favorite || card.liked" class="cover-fallback liked-fallback"><Heart :size="30" /></span>
                         <img v-else :src="fallbackCover" alt="" loading="lazy" decoding="async" draggable="false" />
+                        <span v-if="card.liked && card.item.cover" class="liked-badge" aria-hidden="true"><Heart :size="11" fill="currentColor" /></span>
+                        <span v-if="card.mine" class="mine-badge mono" aria-hidden="true">MINE</span>
                       </span>
                     </button>
                   </div>
@@ -351,6 +355,10 @@ interface WallCard {
   key: string
   item: ExplorePlaylist
   favorite: boolean
+  // 汽水把「我喜欢的音乐」当普通歌单返回，用这个标记补上爱心角标
+  liked: boolean
+  // 用户自建歌单：封面右下角挂 MINE 角标，和推荐歌单区分开
+  mine: boolean
   tag: string
   x: number
   y: number
@@ -642,10 +650,9 @@ const wallCells = (() => {
 })()
 
 const likedCover = computed(() =>
-  props.likedCover
-  || props.favorites.find(track => !track.unavailable)?.img
+  props.favorites.find(track => !track.unavailable)?.img
   || props.favorites[0]?.img
-  || ''
+  || props.likedCover
 )
 
 // 墙上的封面在屏幕里最大不到 210px，按 480px 取图即可，别让网易原图白占显存
@@ -674,6 +681,8 @@ const cardPicks = computed<WallPick[]>(() => {
   const seen = new Set<string>()
   const seenNames = new Set<string>()
   const nameKey = (name: string) => String(name || '').replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase()
+  const isLikedPlaylist = (item: ExplorePlaylist) =>
+    /^我喜欢的(音乐|歌曲)$/.test(String(item.name || '').trim())
   const add = (item: ExplorePlaylist, tag: string, favorite = false) => {
     if (!item?.id || seen.has(item.id)) return
     // 不同来源（自建 / 推荐 / 收藏）常有同名歌单，墙面只留一个入口
@@ -681,7 +690,8 @@ const cardPicks = computed<WallPick[]>(() => {
     if (key && seenNames.has(key)) return
     seen.add(item.id)
     if (key) seenNames.add(key)
-    picks.push({ key: item.id, item, favorite, tag })
+    const liked = isLikedPlaylist(item)
+    picks.push({ key: item.id, item, favorite, liked, mine: tag === 'MINE' && !liked, tag })
   }
 
   if (props.connected && props.showFavorites !== false) {
@@ -1312,6 +1322,7 @@ defineExpose({
 .orbit-node:hover { z-index: 60 !important; }
 .node-card { position: relative; display: block; width: 100%; text-align: center; }
 .node-cover {
+  position: relative;
   display: block;
   width: 100%;
   aspect-ratio: 1;
@@ -1386,6 +1397,43 @@ defineExpose({
 .liked-fallback {
   color: #ffe6ef;
   background: radial-gradient(circle at 34% 28%, #e2648f, #6d1738 72%);
+}
+/* 两个平台的「我喜欢的音乐」用同一枚爱心角标，统一盖在封面右上角 */
+.liked-badge {
+  position: absolute;
+  right: 8%;
+  top: 8%;
+  width: 30%;
+  min-width: 20px;
+  max-width: 34px;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 3px 10px rgba(70, 55, 110, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  color: var(--ruby);
+  pointer-events: none;
+}
+.liked-badge svg { width: 62%; height: 62%; }
+/* 自建歌单的 MINE 角标：和爱心角标同一套玻璃底，同样固定在右上角 */
+.mine-badge {
+  position: absolute;
+  right: 8%;
+  top: 8%;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 3px 10px rgba(70, 55, 110, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  color: #4e4173;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  line-height: 1;
+  text-indent: 0.1em;
+  pointer-events: none;
 }
 
 /* ---- 幽灵封面：空画布外圈的空唱片套 ---- */

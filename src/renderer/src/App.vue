@@ -64,7 +64,7 @@
                   :mine="explorePlaylists"
                   :platform="platformPlaylists"
                   :favorites="platformFavorites"
-                  :liked-cover="likedPlaylist?.cover || ''"
+                  :liked-cover="activeLikedCover"
                   :fallback-cover="fallbackCover"
                   :palette="palette"
                   :connected="exploreConnected"
@@ -90,6 +90,7 @@
                   :owned-playlists="ownedPlaylists"
                   :platform-playlists="platformPlaylists"
                   :fallback-cover="fallbackCover"
+                  :liked-cover="activeLikedCover"
                   :soda-connected="sodaConnected"
                   :loading="exploreLoading"
                   :under-detail="Boolean(collectionDetail)"
@@ -470,6 +471,13 @@ const exploreLoading = computed(() =>
 )
 // 收藏按平台隔离：网易云展示账号红心，汽水展示本机点亮的心
 const platformFavorites = computed(() => favoritesFor(activePlatform.value))
+// 「我喜欢的音乐」封面统一取收藏里第一首的封面，两个平台显示一致
+const activeLikedCover = computed(() => {
+  const list = platformFavorites.value
+  const track = list.find(item => !item.unavailable) || list[0]
+  if (track?.img) return track.img
+  return activePlatform.value === 'netease' ? (likedPlaylist.value?.cover || '') : ''
+})
 const searchBusy = computed(() => activePlatform.value === 'soda' ? sodaSearching.value : searching.value)
 const currentIsFavorite = computed(() => {
   const track = playerState.currentTrack
@@ -729,6 +737,7 @@ function onWindowFocus() {
   windowFocused = true
   syncPowerSavePause()
   void revalidateActiveSession()
+  void refreshActiveData()
   if (showLyrics.value && playerState.isPlaying && !document.hidden && !lyricFrame) {
     lyricTime.value = getCurrentTime()
     syncActiveLyric(lyricTime.value)
@@ -748,6 +757,7 @@ function onVisibilityChange() {
   syncActiveLyric(lyricTime.value)
   if (showLyrics.value && playerState.isPlaying) startLyricClock()
   void revalidateActiveSession()
+  void refreshActiveData()
 }
 
 // 迷你播放条上的动态歌词：当前行 + 下一行
@@ -834,10 +844,10 @@ async function syncLikedSongs(): Promise<boolean> {
   }
 }
 
-async function loadLibrary(): Promise<boolean> {
+async function loadLibrary(silent = false): Promise<boolean> {
   const epoch = accountEpoch
   const requestId = ++libraryRequestId
-  libraryLoading.value = true
+  if (!silent) libraryLoading.value = true
   libraryError.value = ''
   neteaseExpired.value = false
   try {
@@ -1043,6 +1053,27 @@ async function revalidateActiveSession(force = false) {
   }
 }
 
+// 手机上收藏的歌曲、新建的歌单不会主动通知桌面端：回到前台、切平台或重新进入主页时
+// 低频静默补一次资料与红心，避免一直停在上一次进入时的数据
+const DATA_REFRESH_MS = 60_000
+const dataRefreshAt: Record<PlatformKey, number> = { netease: 0, soda: 0 }
+const dataRefreshing = new Set<PlatformKey>()
+
+async function refreshActiveData(platform: PlatformKey = activePlatform.value, force = false) {
+  if (dataRefreshing.has(platform)) return
+  if (!force && Date.now() - dataRefreshAt[platform] < DATA_REFRESH_MS) return
+  if (platform === 'soda' ? !sodaConnected.value : !connected.value) return
+  dataRefreshing.add(platform)
+  dataRefreshAt[platform] = Date.now()
+  try {
+    // 静默刷新失败时保留现有数据；凭据过期仍由 loadLibrary / loadSodaLibrary 统一提示
+    if (platform === 'soda') await loadSodaLibrary(sodaAccountEpoch)
+    else await Promise.all([loadLibrary(true), syncLikedSongs()])
+  } finally {
+    dataRefreshing.delete(platform)
+  }
+}
+
 // 探索页提示条的动作：过期时去重新登录，其余同步失败按当前平台补一次
 
 async function handleConnected() {
@@ -1105,6 +1136,8 @@ function goExplore() {
   exploreDetailOpen.value = false
   closeCollection()
   exploreRef.value?.reset()
+  // 回到主页时补一次数据：手机上新增的收藏/歌单要能在这里看到
+  void refreshActiveData()
 }
 
 function openSearch() {
@@ -1136,6 +1169,7 @@ function goLibrary(view: 'mine' | 'playlists') {
   closeCollection()
   // 两页都是整页视图，给一次 ESC 可回到探索的提示
   notify(`已进入「${view === 'mine' ? '我的音乐' : '歌单'}」 · 按 ESC 退出`)
+  void refreshActiveData()
 }
 
 function navigateNav(key: NavKey) {
@@ -1225,6 +1259,7 @@ function openPlatform(platform: PlatformKey) {
     }
     // 推荐有缓存时切平台不会发请求，这里主动校验一次，过期能立刻亮出来
     void revalidateActiveSession(true)
+    void refreshActiveData(platform)
   }
   if (platform === 'netease' && !connected.value) openLogin('netease')
   // 上一次同步失败或资料为空时，切回该平台顺手补一次，避免一直停在“只有缓存封面”的状态
@@ -1805,6 +1840,7 @@ onMounted(() => {
     await Promise.allSettled([refreshConnection(), refreshSodaConnection()])
     // 启动刚校验过，记下时间，避免窗口一获得焦点就重复请求
     sessionRecheckAt = Date.now()
+    dataRefreshAt.netease = dataRefreshAt.soda = Date.now()
     if (activePlatform.value === 'soda' && sodaConnected.value) await loadSodaRecommendations()
     if (showSplash.value) {
       await new Promise<void>((resolve) => {

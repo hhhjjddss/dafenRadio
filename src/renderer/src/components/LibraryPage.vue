@@ -11,7 +11,10 @@
         <div v-if="ownedPlaylists.length && !mineSkeleton" class="library-grid">
           <button v-for="list in ownedPlaylists" :key="list.id" class="library-card" @click="emit('expand', list)">
             <span class="library-card-art">
-              <img :src="neteaseThumb(list.cover) || fallbackCover" alt="" @error="fallbackCoverOnError" />
+              <img v-if="!isLikedPlaylist(list) || likedCoverOf(list)" :src="likedCoverOf(list) || fallbackCover" alt="" @error="fallbackCoverOnError" />
+              <span v-else class="library-card-liked"><Heart :size="26" /></span>
+              <span v-if="isLikedPlaylist(list) && likedCoverOf(list)" class="library-liked-badge" aria-hidden="true"><Heart :size="13" fill="currentColor" /></span>
+              <span v-if="!isLikedPlaylist(list)" class="library-mine-badge mono" aria-hidden="true">MINE</span>
               <span class="library-card-play"><Play :size="14" fill="currentColor" /></span>
             </span>
             <strong>{{ list.name }}</strong>
@@ -62,7 +65,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ListMusic, Play } from '@lucide/vue'
+import { Heart, ListMusic, Play } from '@lucide/vue'
 import { fallbackCoverOnError, loadCover, neteaseThumb } from '../utils/cover'
 
 interface Playlist {
@@ -72,6 +75,8 @@ interface Playlist {
   count?: number
   trackCount?: number
   creator?: string
+  // 网易云用 specialType=5 标记红心歌单，名字也可能是「昵称喜欢的音乐」
+  specialType?: number
 }
 
 const props = defineProps<{
@@ -80,6 +85,8 @@ const props = defineProps<{
   ownedPlaylists: Playlist[]
   platformPlaylists: Playlist[]
   fallbackCover: string
+  // 「我喜欢的音乐」优先用收藏里第一首歌的封面，和探索墙保持一致
+  likedCover?: string
   sodaConnected: boolean
   // 歌单/推荐还在同步时先铺骨架卡片，避免空页面
   loading: boolean
@@ -113,8 +120,18 @@ onMounted(() => window.addEventListener('resize', measureSkeletonCount))
 
 // 骨架揭开前先把整页封面解码完：只预取首屏时，滚到下面的卡片图片还是会一张张冒出来
 // 预取和 <img> 用同一个小图 URL，命中同一份缓存
-const currentList = computed(() => (props.nav === 'mine' ? props.ownedPlaylists : props.platformPlaylists))
-const currentCovers = computed(() => currentList.value.map(item => neteaseThumb(item.cover)).filter(Boolean))
+// 两个平台的「我喜欢的音乐」都走同一套爱心样式；网易云的红心歌单名字带昵称，靠 specialType 识别
+function isLikedPlaylist(list: Playlist) {
+  return Number(list.specialType) === 5 || /^我喜欢的(音乐|歌曲)$/.test(String(list.name || '').trim())
+}
+function likedCoverOf(list: Playlist) {
+  if (!isLikedPlaylist(list)) return neteaseThumb(list.cover)
+  return neteaseThumb(props.likedCover || '') || neteaseThumb(list.cover)
+}
+const currentCovers = computed(() => (props.nav === 'mine'
+  ? props.ownedPlaylists.map(likedCoverOf)
+  : props.platformPlaylists.map(item => neteaseThumb(item.cover))
+).filter(Boolean))
 const coversReady = ref(true)
 let coversEpoch = 0
 watch(currentCovers, async (urls) => {
@@ -191,6 +208,38 @@ onBeforeUnmount(() => {
 .library-card-art img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1); animation: cover-in 0.35s ease; }
 .library-card:hover .library-card-art { transform: translateY(-3px); box-shadow: 0 16px 34px rgba(70, 55, 110, 0.18); }
 .library-card:hover .library-card-art img { transform: scale(1.04); }
+.library-card-liked {
+  display: grid; place-items: center;
+  width: 100%; height: 100%;
+  color: #ffe6ef;
+  background: radial-gradient(circle at 34% 28%, #e2648f, #6d1738 72%);
+}
+.library-liked-badge {
+  position: absolute; top: 8px; right: 8px;
+  display: grid; place-items: center;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 3px 10px rgba(70, 55, 110, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  color: var(--ruby);
+}
+/* 用户自建歌单的 MINE 角标：和爱心角标统一放在封面右上角 */
+.library-mine-badge {
+  position: absolute; right: 8px; top: 8px;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 3px 10px rgba(70, 55, 110, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  color: #4e4173;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  line-height: 1;
+  text-indent: 0.1em;
+  pointer-events: none;
+}
 .library-card-play {
   position: absolute; right: 10px; bottom: 10px;
   display: grid; place-items: center;
