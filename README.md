@@ -4,9 +4,7 @@
 [![GitHub Downloads](https://img.shields.io/github/downloads/hhhjjddss/dafenRadio/total?style=flat-square&color=blue)](https://github.com/hhhjjddss/dafenRadio/releases)
 
 > 网易云音乐 / 汽水音乐双平台扫码登录的桌面播放器
-
 **(装包失败右键管理员运行即可!)**
-
 ![](https://p.sda1.dev/36/494871932e8610e33f9c55d0c7798e82/xx.gif)
 
 ---
