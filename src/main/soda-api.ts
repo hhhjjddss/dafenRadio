@@ -813,12 +813,12 @@ function mapTrack(raw: any) {
   }
 }
 
-// 一次 discover/mix 最多只给 8–10 个歌单，且不同批次有重复；歌单页要铺满 50 格，
-// 所以并发多取几份再按 id 去重。
-const RECOMMEND_BATCHES = 10
+// 一次 discover/mix 最多只给 8–10 个歌单，且不同批次有重复；探索墙要铺满 60 格，
+// 所以并发多取几份再按 id 去重（多取两份，保证按 id/名字/封面去重后仍够 60 张不重复封面）。
+const RECOMMEND_BATCHES = 12
 let recommendCache: { session: string; at: number; value: NonNullable<ReturnType<typeof mapPlaylist>>[] } | null = null
 
-export async function getSodaRecommendations(limit = 50, force = false) {
+export async function getSodaRecommendations(limit = 60, force = false) {
   loadSodaSession()
   // 探索推荐只对登录账号开放，避免匿名设备拉到不属于用户的公共内容
   if (!sodaCookie) throw new Error('请先登录汽水音乐')
@@ -839,6 +839,7 @@ export async function getSodaRecommendations(limit = 50, force = false) {
   )
   const seen = new Set<string>()
   const seenNames = new Set<string>()
+  const seenCovers = new Set<string>()
   const playlists: NonNullable<ReturnType<typeof mapPlaylist>>[] = []
   let firstError: any = null
   for (const result of responses) {
@@ -854,8 +855,12 @@ export async function getSodaRecommendations(limit = 50, force = false) {
         // 同一批里常出现换了 id 的同名歌单，按名字再挡一次
         const nameKey = playlist.name.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '')
         if (!nameKey || seenNames.has(nameKey)) continue
+        // 不同歌单会复用同一张封面（官方聚合、翻唱合集），按图再挡一次，墙面才不会成对重复
+        const coverKey = playlist.cover.split('?')[0].replace(/~[^/]*$/, '')
+        if (coverKey && seenCovers.has(coverKey)) continue
         seen.add(playlist.id)
         seenNames.add(nameKey)
+        if (coverKey) seenCovers.add(coverKey)
         playlists.push(playlist)
       }
     }
@@ -1037,9 +1042,18 @@ export async function searchSodaPlaylists(keyword: string) {
 /* ============ 账号资料与我的歌单 ============ */
 function mapProfile(raw: any) {
   const info = raw?.my_info || raw?.user || raw || {}
-  // 汽水不提供成长等级，只给会员阶段；vip_stage 为 svip 时才标 SVIP
-  const stage = String(info.vip_stage || '').toLowerCase()
-  const vip: '' | 'vip' | 'svip' = stage.includes('svip') ? 'svip' : (info.is_vip || stage === 'vip') ? 'vip' : ''
+  const vipInfo = info.vip_info || info.vipInfo || {}
+  // 汽水不提供成长等级，只给会员阶段；不同接口版本字段位置略有差异，这里统一兜底
+  const stage = String(info.vip_stage || vipInfo.vip_stage || '').toLowerCase()
+  const svip = stage.includes('svip') || info.is_svip === true || vipInfo.is_svip === true
+  const vip = info.is_vip === true || vipInfo.is_vip === true || stage.includes('vip')
+  const vipTier: '' | 'vip' | 'svip' = svip ? 'svip' : vip ? 'vip' : ''
+  // 只有接口确实下发了会员字段才敢判定为非会员；否则交给服务端按实际权限兜底，避免误拦真会员
+  const vipKnown =
+    info.vip_stage != null || vipInfo.vip_stage != null ||
+    typeof info.is_vip === 'boolean' || typeof vipInfo.is_vip === 'boolean' ||
+    typeof info.is_svip === 'boolean' || typeof vipInfo.is_svip === 'boolean' ||
+    (vipInfo && typeof vipInfo === 'object' && Object.keys(vipInfo).length > 0)
   return {
     name: String(info.nickname || info.name || ''),
     avatar: pickUrl(
@@ -1047,7 +1061,8 @@ function mapProfile(raw: any) {
       info.avatar_url || info.avatar || info.avatar_thumb || info.avatar_large || info.avatar_medium
     ),
     level: Number(info.level || 0) || 0,
-    vip
+    vip: vipTier,
+    vipKnown
   }
 }
 
@@ -1073,12 +1088,20 @@ export async function getSodaLibrary() {
   return { profile, playlists }
 }
 
+interface SodaAudioVariant {
+  // highest / higher / medium，具体档位由平台下发
+  quality: string
+  bitrate: number
+  url: string
+}
+
 interface SodaSong {
   name: string
   artists: string[]
   album: string
   cover: string
-  audioUrl: string
+  // 同一首歌下发多档音源，按码率从高到低排列
+  variants: SodaAudioVariant[]
   lyric: string
   // 目录时长（秒），用来判断拿到的音源是不是被截断的试听片段
   duration: number
@@ -1098,12 +1121,19 @@ async function fetchSodaSong(trackId: string): Promise<SodaSong> {
     query: { track_id: trackId, device_platform: 'web' }
   })
   const track = body?.seo_track?.track || {}
-  let audioUrl = ''
+  let variants: SodaAudioVariant[] = []
   let servedVid = ''
   try {
     const video = JSON.parse(body?.track_player?.video_model || '{}')
-    audioUrl = video?.video_list?.[0]?.main_url || video?.video_list?.[0]?.backup_url || ''
     servedVid = String(video?.video_id || '')
+    variants = (Array.isArray(video?.video_list) ? video.video_list : [])
+      .map((item: any) => ({
+        quality: String(item?.video_meta?.quality || ''),
+        bitrate: Number(item?.video_meta?.bitrate || item?.video_meta?.real_bitrate || 0) || 0,
+        url: String(item?.main_url || item?.backup_url || '')
+      }))
+      .filter((item: SodaAudioVariant) => item.url)
+      .sort((a: SodaAudioVariant, b: SodaAudioVariant) => b.bitrate - a.bitrate)
   } catch { /* 视频模型缺失时按不可播放处理 */ }
   // 免费曲目也带 audition_info，但下发的仍是完整音源；
   // 只有下发 vid 等于 preview.vid 时，音源才是从歌曲中段截出的试听片段
@@ -1116,7 +1146,7 @@ async function fetchSodaSong(trackId: string): Promise<SodaSong> {
       .filter(Boolean),
     album: String(track.album?.name || ''),
     cover: pickUrl(track.album?.url_cover || track.album?.cover_url),
-    audioUrl,
+    variants,
     lyric: String(body?.lyric?.content || ''),
     duration: Math.round(Number(track.duration || 0) / 1000),
     clipStart: isAudition ? Math.round(Number(preview.start || 0) / 1000) : 0,
@@ -1143,13 +1173,18 @@ async function streamDuration(url: string) {
   return 0
 }
 
-export async function getSodaSongUrl(trackId: string) {
+export async function getSodaSongUrl(trackId: string, quality = 'highest') {
   const song = await fetchSodaSong(trackId)
-  if (!song.audioUrl) throw new Error('这首曲子暂时没有可试听的音源')
-  const seconds = await streamDuration(song.audioUrl)
+  const variant = song.variants.find(item => item.quality === quality) || song.variants[0]
+  if (!variant) throw new Error('这首曲子暂时没有可试听的音源')
+  const seconds = await streamDuration(variant.url)
   // 免费歌曲拿到的是完整音源，只有明显短于目录时长的才是试听片段
   const trialSeconds = seconds > 0 && song.duration > 0 && seconds < song.duration - 5 ? seconds : 0
-  return { url: song.audioUrl, trialSeconds }
+  return {
+    url: variant.url,
+    trialSeconds,
+    quality: { level: variant.quality, bitrate: variant.bitrate }
+  }
 }
 
 function formatStamp(seconds: number) {

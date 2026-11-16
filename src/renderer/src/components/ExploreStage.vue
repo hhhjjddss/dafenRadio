@@ -369,6 +369,7 @@ type WallPick = Omit<WallCard, 'x' | 'y'>
 const props = defineProps<{
   mine: ExplorePlaylist[]
   platform: ExplorePlaylist[]
+  albums?: ExplorePlaylist[]
   favorites: MusicInfo[]
   likedCover: string
   fallbackCover: string
@@ -493,10 +494,13 @@ const driftGeometry = computed(() => {
   const rotorSize = Math.ceil(span + pitch * 2)
   // 每行正好一个 pitch 高，环回后整圈无缝铺满，比 span 多一行就够盖住接缝
   const rowsFit = Math.ceil(h / pitch)
-  const rowCount = tilted
+  const rawRows = tilted
     ? Math.min(28, Math.max(4, Math.ceil(span / pitch) + 1))
-    // 行云保持 5 行的疏朗排布，窗口更高时补足行数，保证竖向环回不露白
+    // 行云保持疏朗排布，窗口更高时补足行数，保证竖向环回不露白
     : Math.max(2, rowsFit < 5 ? rowsFit + 1 : rowsFit)
+  // 行轨首尾相接成环：只有偶数行，绕回接缝两侧才会继续保持反向；
+  // 奇数行会让最后一行贴着第一行，出现相邻两列同向流动
+  const rowCount = rawRows % 2 ? rawRows + 1 : rawRows
   const rowWidth = tilted ? rotorSize : w + pitch
   // 三份轨道还要兜住 ±半组的拖拽相位，序列按可见宽度再留一个 pitch
   const sequenceWidth = tilted ? span + pitch : rowWidth
@@ -524,14 +528,28 @@ interface DriftRow {
 const driftRows = computed<DriftRow[]>(() => {
   const cards = cardPicks.value
   if (!cards.length) return []
-  const { tilted, rowCount, sequenceLength, pitch } = driftGeometry.value
+  const { tilted, rowCount, sequenceLength, pitch, rotorSize } = driftGeometry.value
+  // 整个池子按顺序切成连续的窗口，每行一段：先让每张封面都各出现一次，用完了才绕回重复。
+  // 旧做法是每行各取一段窗口、起点按黄金比例错开，相邻窗口大面积重叠——
+  // 于是同一屏里同一张封面出现好几次，而池子里另一些卡始终没露过面。
+  // 步长就是一行长度，相邻行首尾相接、互不重叠。池子比一行还短时退化成逐行错开一张，
+  // 至少相邻两行内容不同。
+  const stride = cards.length >= sequenceLength ? sequenceLength : 1
+  // 先铺离屏幕中心最近的行，往外依次排：池子够用时正中几行保证互不重复，
+  // 绕回只落在旋转后贴着屏幕四角、几乎看不见的最外圈行上。
+  const centerY = tilted ? rotorSize / 2 : 0
+  const rowCenterY = (index: number) =>
+    tilted ? index * pitch + pitch / 2 : (index - (rowCount - 1) / 2) * pitch
+  const rankOf = new Map(
+    Array.from({ length: rowCount }, (_, index) => index)
+      .sort((a, b) => Math.abs(rowCenterY(a) - centerY) - Math.abs(rowCenterY(b) - centerY) || a - b)
+      .map((row, position) => [row, position])
+  )
   return Array.from({ length: rowCount }, (_, index) => {
-    // 每行从全量歌单里取一段等距错开的连续窗口：一行内封面互不重复，
-    // 行与行之间也彼此错开，不会每几张就绕回同一小组
     const rowCards: WallPick[] = []
-    const offset = Math.round((index * cards.length) / rowCount)
+    const base = (rankOf.get(index) ?? index) * stride
     for (let i = 0; i < sequenceLength; i++) {
-      rowCards.push(cards[(offset + i) % cards.length])
+      rowCards.push(cards[(base + i) % cards.length])
     }
     return {
       key: `row-${index}`,
@@ -573,10 +591,19 @@ function driftRowStyle(row: DriftRow) {
   return { transform: `translateY(calc(-50% + ${y}px))` }
 }
 
-// 画布尺寸必须正好等于歌单格阵列的整数倍：七列五行就是 7×5 个格子。
-// 之前留了半格边距，平铺后块与块之间会空出一整列/一整行「空白格子」。
-const GALAXY_W = 1260
-const GALAXY_H = 900
+/* ============ 布局：横平竖直的歌单格 ============ */
+// 十列六行共 60 格：两个平台的歌单池都够铺满，全墙没有重复封面。
+// 封面尺寸与间距不变，同屏 40 余张，拖动画布翻看其余。
+// 离中心越近越属于你自己，喜欢和自建歌单仍落在正中央区域。
+const WALL_COLS = 10
+const WALL_ROWS = 6
+const WALL_GAP = 180
+const WALL_COVER = 140
+
+// 画布尺寸必须正好等于歌单格阵列的整数倍：10×180 / 6×180，保证 3×3 平铺无缝衔接。
+// 注意 galaxyTiles 在下方立即求值，GALAXY 常量必须在此之前完成初始化
+const GALAXY_W = WALL_COLS * WALL_GAP
+const GALAXY_H = WALL_ROWS * WALL_GAP
 
 /* ============ 无限画布 ============ */
 // 把同一套星空平铺成 3×3。拖动时让每个 tile 在 3 倍画布范围内环回，
@@ -599,7 +626,15 @@ function wrapOffset(value: number, size: number) {
 
 function tileStyle(tile: (typeof galaxyTiles)[number]) {
   const offset = tileOffsets.value[tile.index]
-  return { transform: `translate3d(${offset.x}px, ${offset.y}px, 0)` }
+  // tile 盒子必须与 GALAXY_W/H 同步：硬编码的旧尺寸会让 3×3 副本之间留出
+  // 与卡片网格错位的缝隙，表现为边缘半张封面 + 中央空白带
+  return {
+    transform: `translate3d(${offset.x}px, ${offset.y}px, 0)`,
+    width: `${GALAXY_W}px`,
+    height: `${GALAXY_H}px`,
+    marginLeft: `${-GALAXY_W / 2}px`,
+    marginTop: `${-GALAXY_H / 2}px`
+  }
 }
 
 // 把 track 的位移换算成每个 tile 的相对位移：视觉位置环回，DOM 只保留 9 份。
@@ -628,25 +663,27 @@ let paletteToken = 0
 let recenterTween: gsap.core.Tween | null = null
 
 /* ============ 布局：横平竖直的歌单格 ============ */
-// 七列五行，封面严格按行列对齐；离中心越近越属于你自己，
-// 因此排序后喜欢和自建歌单会落在正中央的 3×3 里。
-const WALL_COLS = 7
-const WALL_ROWS = 5
-const WALL_GAP = 180
-const WALL_COVER = 140
 
 const wallCells = (() => {
-  const cells: { x: number; y: number }[] = []
+  const cells: { x: number; y: number; ring: number; angle: number }[] = []
   for (let row = 0; row < WALL_ROWS; row++) {
     for (let col = 0; col < WALL_COLS; col++) {
+      const x = (col - (WALL_COLS - 1) / 2) * WALL_GAP
+      const y = (row - (WALL_ROWS - 1) / 2) * WALL_GAP
       cells.push({
-        x: (col - (WALL_COLS - 1) / 2) * WALL_GAP,
-        y: (row - (WALL_ROWS - 1) / 2) * WALL_GAP
+        x,
+        y,
+        // 切比雪夫半径 = 离中心第几圈；同圈再按极角排，格子才会一圈圈绕着中心铺开。
+        // 用欧氏距离在等距方格上会出现斜向插队（如 3.5,0.5 与 2.5,2.5 同距），
+        // 视觉上像从中心斜着扩散，而不是环绕。
+        ring: Math.max(Math.abs(x), Math.abs(y)),
+        angle: Math.atan2(y, x)
       })
     }
   }
-  // 以正中心为原点由内向外分配：正中心一定留给自己的歌单
-  return cells.sort((a, b) => (a.x * a.x + a.y * a.y) - (b.x * b.x + b.y * b.y))
+  // 由内向外：第一格必定是最中心，留给「我喜欢的音乐」，其余自建歌单逐圈围上去
+  cells.sort((a, b) => a.ring - b.ring || a.angle - b.angle)
+  return cells.map(({ x, y }) => ({ x, y }))
 })()
 
 const likedCover = computed(() =>
@@ -675,12 +712,14 @@ function wallCover(url: string) {
   return next
 }
 
-// 全量歌单卡：格阵只铺前 35 个，行云/斜列需要更长的序列，用满所有歌单来摊薄重复
+// 全量歌单卡：格阵只用到前 60 个，行云/斜列需要更长的序列，用满所有歌单来摊薄重复
 const cardPicks = computed<WallPick[]>(() => {
   const picks: Omit<WallCard, 'x' | 'y'>[] = []
   const seen = new Set<string>()
   const seenNames = new Set<string>()
+  const seenCovers = new Set<string>()
   const nameKey = (name: string) => String(name || '').replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase()
+  const coverKey = (url: string) => String(url || '').split('?')[0].replace(/~[^/]*$/, '')
   const isLikedPlaylist = (item: ExplorePlaylist) =>
     /^我喜欢的(音乐|歌曲)$/.test(String(item.name || '').trim())
   const add = (item: ExplorePlaylist, tag: string, favorite = false) => {
@@ -688,8 +727,12 @@ const cardPicks = computed<WallPick[]>(() => {
     // 不同来源（自建 / 推荐 / 收藏）常有同名歌单，墙面只留一个入口
     const key = nameKey(item.name)
     if (key && seenNames.has(key)) return
+    // 不同歌单会复用同一张封面，按图再挡一次，相邻格才不会成对重复
+    const cover = coverKey(item.cover)
+    if (cover && seenCovers.has(cover)) return
     seen.add(item.id)
     if (key) seenNames.add(key)
+    if (cover) seenCovers.add(cover)
     const liked = isLikedPlaylist(item)
     picks.push({ key: item.id, item, favorite, liked, mine: tag === 'MINE' && !liked, tag })
   }
@@ -697,17 +740,37 @@ const cardPicks = computed<WallPick[]>(() => {
   if (props.connected && props.showFavorites !== false) {
     add({ id: 'liked', name: '我喜欢的音乐', cover: likedCover.value, kind: 'favorites' }, 'FAVORITES', true)
   }
-  for (const item of props.mine.slice(0, 8)) add(item, 'MINE')
+  // 网易用独立的心形节点锚定正中央；汽水把「我喜欢的音乐」当普通歌单返回，
+  // 这里把红心歌单排到自建歌单最前面，两个平台都让「我喜欢的音乐」落在画布正中央
+  const minePicks = [...props.mine]
+    .sort((a, b) => Number(isLikedPlaylist(b)) - Number(isLikedPlaylist(a)))
+    .slice(0, 24)
+  for (const item of minePicks) add(item, 'MINE')
 
   const platformTag = props.platformKey === 'soda' ? 'SODA' : 'FOR YOU'
   for (const item of props.platform) add(item, platformTag)
 
+  // 最新专辑拉回来就别闲置：挂在墙尾丰富封面池（歌单详情打开专辑用同一套入口）
+  for (const item of props.albums ?? []) add(item, 'ALBUM')
+
   return picks
 })
 
-const wallCards = computed<WallCard[]>(() =>
-  cardPicks.value.slice(0, wallCells.length).map((pick, index) => ({ ...pick, ...wallCells[index] }))
-)
+const wallCards = computed<WallCard[]>(() => {
+  const picks = cardPicks.value
+  if (!picks.length) return []
+  // 池子不足整面墙时循环复用补满：格阵的 3×3 平铺本来就依赖重复铺满，
+  // 与其让空格露底（幽灵盘再显眼也像坏块），不如保证墙永远是满的；
+  // 模循环的重复条目与本尊相隔整整一轮，相邻格不会撞封面
+  return wallCells.map((cell, index) => {
+    const pick = picks[index % picks.length]
+    return {
+      ...pick,
+      key: index < picks.length ? pick.key : `${pick.key}-wrap-${index}`,
+      ...cell
+    }
+  })
+})
 
 // 歌单被清空或进入详情时关闭排布菜单，避免遮罩留在没有入口的界面上
 watch(cardPicks, cards => {
@@ -1036,12 +1099,13 @@ function playFromCollection(track: MusicInfo, index: number) {
 
 /* ============ 拖拽与缩放 ============ */
 // 画布为无限拖拽做了 3×3 平铺：只要一块格阵盖不满视口，边上就会露出隔壁副本的同名封面，
-// 看着就像歌单重复了一半。按「刚好盖满」的比例缩放，静止时视野里只有一块格阵。
+// 看着就像歌单重复了一半。格阵为 60 格（画布 1800×1080），视口更高时靠下面的 raw 缩放兜住，
+// 缩放下限 1：常规视口下封面保持原始 140px，同屏 40 余张，其余拖动翻看。
 function updateScale() {
   const view = viewportEl.value?.getBoundingClientRect()
   if (!view) return
   const raw = Math.max(view.width / GALAXY_W, view.height / GALAXY_H)
-  galaxyScale.value = Math.min(1.6, Math.max(0.75, raw))
+  galaxyScale.value = Math.min(1.6, Math.max(1, raw))
 }
 
 function updateViewportSize() {
@@ -1288,14 +1352,11 @@ defineExpose({
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 1260px;
-  height: 900px;
-  margin-left: -630px;
-  margin-top: -450px;
+  /* 盒子尺寸由 tileStyle 内联绑定 GALAXY_W/H，这里不再硬编码 */
   will-change: transform;
   /* 3×3 平铺会产生几百张封面，离屏 tile 跳过布局与绘制，登录后同步不再卡主线程 */
   content-visibility: auto;
-  contain-intrinsic-size: 1260px 900px;
+  contain-intrinsic-size: 1800px 1080px;
 }
 
 /* ---- 分区线：贯穿画布的 45° 细线网格 ---- */
@@ -1450,17 +1511,17 @@ defineExpose({
   width: 140px;
   height: 140px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  background: rgba(255, 255, 255, 0.32);
+  border: 1px solid rgba(112, 96, 170, 0.38);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.62), rgba(141, 134, 242, 0.16));
   box-shadow:
-    0 12px 30px rgba(70, 55, 110, 0.06),
+    0 12px 30px rgba(70, 55, 110, 0.08),
     inset 0 1px 0 rgba(255, 255, 255, 0.64);
-  color: rgba(25, 23, 34, 0.32);
+  color: rgba(90, 80, 140, 0.55);
 }
 .ghost-sleeve.blank {
   border-style: dashed;
-  border-color: rgba(86, 74, 120, 0.16);
-  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(112, 96, 170, 0.3);
+  background: rgba(255, 255, 255, 0.38);
   box-shadow: none;
 }
 /* 方形空画布：幽灵套同样铺满整格，不加任何缝 */
@@ -1470,15 +1531,15 @@ defineExpose({
   height: 180px;
   border: 0;
   border-radius: 0;
-  background: rgba(255, 255, 255, 0.2);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.58), rgba(141, 134, 242, 0.2));
   box-shadow: none;
-  color: rgba(25, 23, 34, 0.24);
+  color: rgba(90, 80, 140, 0.45);
 }
-.square-wall .ghost-sleeve:nth-child(3n) { background: rgba(255, 255, 255, 0.26); }
-.square-wall .ghost-sleeve:nth-child(4n + 1) { background: rgba(255, 255, 255, 0.14); }
+.square-wall .ghost-sleeve:nth-child(3n) { background: linear-gradient(200deg, rgba(255, 255, 255, 0.62), rgba(141, 134, 242, 0.24)); }
+.square-wall .ghost-sleeve:nth-child(4n + 1) { background: linear-gradient(140deg, rgba(255, 255, 255, 0.5), rgba(141, 134, 242, 0.14)); }
 .square-wall .ghost-sleeve.blank {
   border: 0;
-  background: rgba(255, 255, 255, 0.11);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.46), rgba(141, 134, 242, 0.1));
 }
 .ghost-wall.breathing .ghost-sleeve {
   animation: ghost-breathe 3.6s ease-in-out infinite;

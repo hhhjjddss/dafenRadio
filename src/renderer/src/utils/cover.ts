@@ -22,31 +22,70 @@ export function neteaseThumb(url: string, size = '480y480') {
   return next
 }
 
-// 未登录、跨平台旧链接或封面过期时 <img> 会静默失败，这里退回默认封面而不是留白
+// 未登录、跨平台旧链接或封面过期时 <img> 会静默失败，这里退回默认封面而不是留白。
+// 封面池扩到近两百张后，首屏并发会把 CDN 挤兑出整批拒图（连续一排占位盘）：
+// 先隔一小会儿用带 retry 标记的地址重试一次，仍失败才落占位盘
 export function fallbackCoverOnError(event: Event) {
   const image = event.target as HTMLImageElement | null
   if (!image || image.src === FALLBACK_COVER) return
+  const original = image.dataset.originalSrc || image.src
+  const retried = Number(image.dataset.retryCount || 0)
+  if (retried < 1) {
+    image.dataset.retryCount = String(retried + 1)
+    window.setTimeout(() => {
+      if (image.src === FALLBACK_COVER) return
+      image.src = `${original}${original.includes('?') ? '&' : '?'}retry=${retried + 1}`
+    }, 700)
+    return
+  }
   image.src = FALLBACK_COVER
 }
 
 // 封面必须真正解码完成才算就绪，onload 早于解码会让图片在揭开遮罩后一张张补上。
 // 12s 只是防止单张请求挂死的兜底，正常网络下都会提前结束。
+// 同时限制全局并发：几百张同时解码会互相挤兑，整批被 CDN 拒图
+const LOAD_CONCURRENCY = 6
+let activeLoads = 0
+const loadWaiting: (() => void)[] = []
+
+function acquireLoadSlot(): Promise<void> {
+  return new Promise(resolve => {
+    const start = () => {
+      activeLoads += 1
+      resolve()
+    }
+    if (activeLoads < LOAD_CONCURRENCY) start()
+    else loadWaiting.push(start)
+  })
+}
+
+function releaseLoadSlot() {
+  activeLoads -= 1
+  const next = loadWaiting.shift()
+  if (next) next()
+}
+
 export function loadCover(url: string) {
   return new Promise<void>(resolve => {
-    const image = new Image()
     let settled = false
     let timer = 0
+    const image = new Image()
+
     const finish = () => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      releaseLoadSlot()
       resolve()
     }
-    image.onload = () => {
-      image.decode().then(finish, finish)
-    }
-    image.onerror = finish
-    image.src = url
-    timer = window.setTimeout(finish, 12000)
+
+    void acquireLoadSlot().then(() => {
+      image.onload = () => {
+        image.decode().then(finish, finish)
+      }
+      image.onerror = finish
+      image.src = url
+      timer = window.setTimeout(finish, 12000)
+    })
   })
 }

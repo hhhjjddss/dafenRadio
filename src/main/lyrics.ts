@@ -19,7 +19,7 @@ export async function searchOnlineLyrics(name: string, singer = '', duration = 0
     if (String(singer || '').trim()) url.searchParams.set('artist_name', String(singer).trim())
     const response = await fetch(url, {
       signal: AbortSignal.timeout(12000),
-      headers: { 'User-Agent': 'DaFenRadio/1.1.4 (local lyrics lookup)' }
+      headers: { 'User-Agent': 'DaFenRadio/1.1.5 (local lyrics lookup)' }
     })
     if (!response.ok) return null
     const data: any = await response.json()

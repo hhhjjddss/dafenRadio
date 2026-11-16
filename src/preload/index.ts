@@ -111,8 +111,8 @@ const api = {
   sodaLogout: () => ipcRenderer.invoke('soda:logout'),
   sodaLibrary: () => ipcRenderer.invoke('soda:library'),
 
-  // 返回当前平台的音频地址与试听时长，由应用内播放器播放
-  playerPlay: (songId: string, platform = 'netease') => ipcRenderer.invoke('player:play', songId, platform),
+  // 返回当前平台的音频地址、试听时长与实际音质，由应用内播放器播放
+  playerPlay: (songId: string, platform = 'netease', quality?: string) => ipcRenderer.invoke('player:play', songId, platform, quality),
 
   // 从封面图片提取主色（动态色彩系统）
   themePalette: (url: string) => ipcRenderer.invoke('theme:palette', url),

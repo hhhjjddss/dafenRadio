@@ -63,6 +63,7 @@
                   ref="exploreRef"
                   :mine="explorePlaylists"
                   :platform="platformPlaylists"
+                  :albums="exploreAlbums"
                   :favorites="platformFavorites"
                   :liked-cover="activeLikedCover"
                   :fallback-cover="fallbackCover"
@@ -176,6 +177,8 @@
         :volume="playerState.volume"
         :mode="playMode"
         :mode-title="modeTitle"
+        :platform="currentTrackPlatform"
+        :quality="currentTrackPlatform === 'soda' ? sodaQuality : neteaseQuality"
         @close="closeLyrics"
         @toggle-lyric-bar="toggleLyricBar"
         @toggle-fullscreen="toggleFullscreen"
@@ -185,7 +188,7 @@
         @next="playNext"
         @toggle-favorite="toggleCurrentFavorite"
         @cycle-mode="cyclePlayMode"
-        @toggle-queue="toggleQueueFromLyrics"
+        @select-quality="handleQualitySelect"
         @mute="toggleMute"
         @volume="handleVolume"
       />
@@ -296,6 +299,7 @@ import { useFavorites } from './composables/useFavorites'
 import { usePlaylist } from './composables/usePlaylist'
 import { parseLrc, parseYrc } from './utils/lyrics'
 import { FALLBACK_COVER } from './utils/cover'
+import { NETEASE_QUALITY_OPTIONS, NETEASE_QUALITY_STORAGE, SODA_QUALITY_OPTIONS, SODA_QUALITY_STORAGE, meetsVip, qualityLabel, readStoredQuality, vipBadge, type NeteaseQuality, type SodaQuality } from './utils/quality'
 import { AlertCircle, Check, Heart, Music2 } from '@lucide/vue'
 
 interface Album { id: string; name: string; artist: string; cover: string; kind: 'album' }
@@ -308,7 +312,7 @@ const appWindow = window
 
 /* ============ 状态 ============ */
 const { searchResults, searching, search } = useNetease()
-const { state: playerState, play, togglePlay, seek, setVolume, setLyric, stop: stopPlayback, playMode, setPlayMode, getCurrentTime } = usePlayer()
+const { state: playerState, play, togglePlay, seek, setVolume, setLyric, stop: stopPlayback, playMode, setPlayMode, getCurrentTime, switchQuality, setQualityPreference } = usePlayer()
 const savedPlayMode = localStorage.getItem('dafen:play-mode') as PlayMode | null
 if (savedPlayMode && (['sequence', 'repeat-all', 'repeat-one', 'shuffle'] as string[]).includes(savedPlayMode)) {
   setPlayMode(savedPlayMode)
@@ -318,6 +322,9 @@ watch(playMode, (mode) => {
 })
 const { favoritesFor, isFavorite, toggleFavorite, replaceFavorites } = useFavorites()
 const { setPlayQueue, commitIndex, getCurrentInfo, getPrevTrack, getNextTrack } = usePlaylist()
+
+// 当前歌曲所属平台决定歌词页展示哪一套音质档位
+const currentTrackPlatform = computed<PlatformKey>(() => playerState.currentTrack?.platform === 'soda' ? 'soda' : 'netease')
 
 const albums = ref<Album[]>([])
 const playlists = ref<Playlist[]>([])
@@ -331,8 +338,10 @@ interface AccountProfile {
   avatar: string
   level: number
   vip: AccountVip
+  // 会员字段是否真的拿到了；拿不到时不能把账号当成普通用户去拦音质
+  vipKnown: boolean
 }
-const emptyProfile = (): AccountProfile => ({ name: '', avatar: '', level: 0, vip: '' })
+const emptyProfile = (): AccountProfile => ({ name: '', avatar: '', level: 0, vip: '', vipKnown: false })
 // 汽水账号：共用登录凭据，登录后展示个人歌单
 const sodaMinePlaylists = ref<Playlist[]>([])
 const sodaProfile = ref<AccountProfile>(emptyProfile())
@@ -386,6 +395,11 @@ const alwaysOnTop = ref(localStorage.getItem('dafen:always-on-top') === '1')
 const autoPlayRecommended = ref(localStorage.getItem('dafen:auto-play-recommend') !== '0')
 // 节能模式：窗口失去焦点时冻结常驻动画，默认开启（保持原有省电行为）
 const powerSave = ref(localStorage.getItem('dafen:power-save') !== '0')
+// 音质偏好：默认保持原有取流档位（网易云极高、汽水最高）
+const neteaseQuality = ref(readStoredQuality(NETEASE_QUALITY_STORAGE, NETEASE_QUALITY_OPTIONS, 'exhigh'))
+const sodaQuality = ref(readStoredQuality(SODA_QUALITY_STORAGE, SODA_QUALITY_OPTIONS, 'highest'))
+setQualityPreference('netease', neteaseQuality.value)
+setQualityPreference('soda', sodaQuality.value)
 // 当前队列是否由推荐按钮载入，用于让按钮保持高亮
 const recommendActive = ref(false)
 const showLyrics = ref(false)
@@ -443,14 +457,27 @@ const ownedPlaylists = computed(() => activePlatform.value === 'soda'
   : playlists.value.filter(item => item.kind === 'mine'))
 // 探索画布上由心形节点承载红心歌单，避免同一份数据出现两个入口
 const explorePlaylists = computed(() => ownedPlaylists.value.filter(item => item !== likedPlaylist.value))
+// 专辑只有网易云有数据源，汽水页不能借到这批：否则两边的探索墙会互相串内容
+const exploreAlbums = computed(() => activePlatform.value === 'soda' ? [] : albums.value)
 const platformPlaylists = computed(() => {
   if (activePlatform.value !== 'soda') return recommendations.value
   // 汽水推荐偶尔会把自己收藏过的歌单再推一遍，别再上墙占格子
+  const coverKey = (url: string) => String(url || '').split('?')[0].replace(/~[^/]*$/, '')
   const ownedIds = new Set(sodaMinePlaylists.value.map(item => item.id))
   const ownedNames = new Set(sodaMinePlaylists.value.map(item => normalizeLyricText(item.name)))
-  return sodaPlaylists.value.filter(item =>
-    !ownedIds.has(item.id) && !ownedNames.has(normalizeLyricText(item.name))
-  )
+  const ownedCovers = new Set(sodaMinePlaylists.value.map(item => coverKey(item.cover)).filter(Boolean))
+  const seenCovers = new Set<string>()
+  const result: Playlist[] = []
+  for (const item of sodaPlaylists.value) {
+    const nameKey = normalizeLyricText(item.name)
+    if (ownedIds.has(item.id) || (nameKey && ownedNames.has(nameKey))) continue
+    // 不同歌单复用同一张封面时只留第一个，墙面相邻格才不会成对重复
+    const cover = coverKey(item.cover)
+    if (cover && (ownedCovers.has(cover) || seenCovers.has(cover))) continue
+    if (cover) seenCovers.add(cover)
+    result.push(item)
+  }
+  return result
 })
 // 当前平台自己的账号状态：两个平台各自独立登录
 const activeProfile = computed(() => activePlatform.value === 'soda' ? sodaProfile.value : profile.value)
@@ -591,6 +618,70 @@ function setPowerSave(enabled: boolean) {
   try { localStorage.setItem('dafen:power-save', enabled ? '1' : '0') } catch { /* 忽略存储异常 */ }
   syncPowerSavePause()
 }
+
+// 歌词页音质——改档后如果当前歌正在该平台播放，立即重新拉流并续播
+function qualityMessage(platform: PlatformKey, requested: string, actual?: { level: string } | null) {
+  const options = platform === 'soda' ? SODA_QUALITY_OPTIONS : NETEASE_QUALITY_OPTIONS
+  const label = qualityLabel(options, requested)
+  if (actual?.level && actual.level !== requested) {
+    return `当前歌曲没有「${label}」，已按「${qualityLabel(options, actual.level)}」播放`
+  }
+  return `${platform === 'soda' ? '汽水' : '网易云'}已切换为「${label}」`
+}
+
+async function applyQuality(platform: PlatformKey, requested: string) {
+  const options = platform === 'soda' ? SODA_QUALITY_OPTIONS : NETEASE_QUALITY_OPTIONS
+  try {
+    const actual = await switchQuality(platform, requested)
+    notify(qualityMessage(platform, requested, actual))
+    return actual
+  } catch {
+    notify(`已切换为「${qualityLabel(options, requested)}」，当前歌曲重载失败，下一首生效`, 'error')
+    return null
+  }
+}
+
+function denyQuality(option: { label: string; vip?: 'vip' | 'svip' } | undefined) {
+  notify(`${option?.label || '该音质'}需要 ${vipBadge(option?.vip)} 会员，升级后可切换`, 'error')
+}
+
+// 账号资料或会员字段还没拿到时先放行，交给服务端返回的实际档位判断，避免把真实会员误拦
+function canSelectQuality(option: { vip?: 'vip' | 'svip' } | undefined, account: AccountProfile) {
+  if (!account.name || !account.vipKnown) return true
+  return meetsVip(option?.vip, account.vip)
+}
+
+async function setNeteaseQuality(value: NeteaseQuality) {
+  if (value === neteaseQuality.value) return
+  const option = NETEASE_QUALITY_OPTIONS.find(item => item.value === value)
+  // 会员档位在确认权限不足时只提示、不切档
+  if (!canSelectQuality(option, profile.value)) {
+    denyQuality(option)
+    return
+  }
+  neteaseQuality.value = value
+  try { localStorage.setItem(NETEASE_QUALITY_STORAGE, value) } catch { /* 忽略存储异常 */ }
+  await applyQuality('netease', value)
+}
+
+async function setSodaQuality(value: SodaQuality) {
+  if (value === sodaQuality.value) return
+  sodaQuality.value = value
+  try { localStorage.setItem(SODA_QUALITY_STORAGE, value) } catch { /* 忽略存储异常 */ }
+  // 个别歌没有该档位时只对当前这首生效，不把偏好改掉，下一首仍按用户选的档位请求
+  await applyQuality('soda', value)
+}
+
+// 账号资料同步或会员过期后，把已选中的会员档位降回可用档位；
+// 只有确认了会员状态才降档，避免会员字段缺失时把真会员的音质改掉
+watch(profile, (account) => {
+  if (!account.vipKnown) return
+  const option = NETEASE_QUALITY_OPTIONS.find(item => item.value === neteaseQuality.value)
+  if (meetsVip(option?.vip, account.vip)) return
+  neteaseQuality.value = 'exhigh'
+  setQualityPreference('netease', 'exhigh')
+  try { localStorage.setItem(NETEASE_QUALITY_STORAGE, 'exhigh') } catch { /* 忽略存储异常 */ }
+})
 
 // 详情页（歌单展开）临时接管全局配色，返回时恢复当前歌曲封面配色
 function handleExploreAccent(accent: { accent: string; glow: string } | null) {
@@ -1594,10 +1685,10 @@ async function closeLyrics() {
   isFullscreen.value = false
 }
 
-// 队列浮层在舞台内（z-index 低于沉浸歌词页），从歌词页点队列要先收起歌词页再展开队列
-function toggleQueueFromLyrics() {
-  void closeLyrics()
-  queuePeek.value = !queuePeek.value
+// 歌词页选音质：按当前歌曲所属平台写入对应偏好
+function handleQualitySelect(value: string) {
+  if (currentTrackPlatform.value === 'soda') void setSodaQuality(value as SodaQuality)
+  else void setNeteaseQuality(value as NeteaseQuality)
 }
 
 async function toggleFullscreen() {

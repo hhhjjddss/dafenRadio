@@ -556,10 +556,13 @@ function mapRecommendation(item: any) {
   }
 }
 
-// /top/playlist 在不同版本的接口里既可能返回 playlists，也可能包在 result 里
+// /top/playlist 在不同版本的接口里既可能返回 playlists，也可能包在 result/data 里
 function topPlaylistList(body: any) {
-  if (Array.isArray(body?.playlists)) return body.playlists
-  return Array.isArray(body?.result?.playlists) ? body.result.playlists : []
+  const candidates = [body?.playlists, body?.result?.playlists, body?.data?.playlists]
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate
+  }
+  return []
 }
 
 // 平台热榜里同名歌单很多（只是创建者不同），按名字去重再上墙
@@ -567,8 +570,15 @@ function normalizePlaylistName(name: string) {
   return String(name || '').toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '')
 }
 
-// 推荐位统一 50 个入口：每日推荐在前，热门歌单只做补充
-const RECOMMEND_LIMIT = 50
+// 探索墙只有 60 格（10×6），池子再大也只用前 60 个：容量压到 60，
+// 既够铺满又不用为用不上的封面付翻页和解码的代价
+const RECOMMEND_LIMIT = 60
+// 热门歌单只留两个分类：多分类并行是本函数最大的并发来源（原来 6+2 个榜单请求）
+const TOP_CATS = ['全部', '华语']
+// 精品歌单与普通热榜重名度极高，对 60 格的墙没有增量，去掉减少并发
+const TOP_HQ_CATS: string[] = []
+// 上一次成功的推荐/专辑缓存：分类热榜接口偶发失败时兜底，探索墙不至于骤减到只剩幽灵盘
+let homeFallback: { recommendations: any[]; albums: any[] } | null = null
 
 // redplus.vipCode 300 是黑胶 SVIP；associator 是普通黑胶 VIP；
 // musicPackage 只是音乐包，不代表会员，不能拿来点亮 VIP 标记。
@@ -596,17 +606,41 @@ export async function getNeteaseLibrary() {
     throw new Error('网易云账号状态暂时不可用，请稍后重试')
   }
 
-  const [playlistResult, albumResult, recommendationResult, topResult, detailResult, vipResult] = await Promise.all([
+  // 歌单榜单：普通热榜按 TOP_CATS 拉，精品榜单同理（默认已清空）
+  const topListRequests = [
+    ...TOP_CATS.map(cat => ({
+      label: `热榜·${cat}`,
+      promise: requestApi(`/top/playlist?limit=50&offset=0&cat=${encodeURIComponent(cat)}&order=hot`, sessionCookie)
+    })),
+    ...TOP_HQ_CATS.map(cat => ({
+      label: `精品·${cat}`,
+      promise: requestApi(`/top/playlist/highquality?limit=50&cat=${encodeURIComponent(cat)}`, sessionCookie)
+    }))
+  ]
+  const [playlistResult, albumResult, recommendationResult, detailResult, vipResult, ...listResults] = await Promise.all([
     requestApi(`/user/playlist?uid=${encodeURIComponent(profile.userId)}&limit=50`, sessionCookie),
     requestApi('/album/newest?limit=24', sessionCookie).catch(() => ({ body: {} })),
-    // 每日推荐只有 30 条，再混入热门歌单，保证探索页有足够多的入口
-    requestApi('/personalized?limit=30', sessionCookie).catch(() => ({ body: {} })),
-    requestApi(`/top/playlist?limit=30&offset=0&cat=${encodeURIComponent('全部')}&order=hot`, sessionCookie).catch(() => ({ body: {} })),
+    // 每日推荐只有 30 条，再混入多分类热门歌单，保证探索页有足够多的入口
+    requestApi('/personalized?limit=30', sessionCookie).catch((error: any) => {
+      console.warn('[网易云] 个性化推荐请求失败:', String(error?.message || error))
+      return { body: {} }
+    }),
     requestApi(`/user/detail?uid=${encodeURIComponent(profile.userId)}`, sessionCookie).catch(() => ({ body: {} })),
-    requestApi(`/vip/info/v2?uid=${encodeURIComponent(profile.userId)}`, sessionCookie).catch(() => ({ body: {} }))
+    requestApi(`/vip/info/v2?uid=${encodeURIComponent(profile.userId)}`, sessionCookie).catch(() => ({ body: {} })),
+    ...topListRequests.map(({ label, promise }) =>
+      promise.then((result: any) => ({ label, body: result.body })).catch((error: any) => {
+        console.warn(`[网易云] 歌单榜单「${label}」请求失败:`, String(error?.message || error))
+        return { label, body: {} }
+      })
+    )
   ])
   const level = Number(detailResult.body?.level) || 0
-  const vip = readNeteaseVip(vipResult.body?.data, profile.vipType)
+  const vipData = vipResult.body?.data
+  const vip = readNeteaseVip(vipData, profile.vipType)
+  // vip/info 可能被风控或超时；只有拿到了会员字段（或登录态明确给了 vipType）才敢判定非会员
+  const vipKnown =
+    Boolean(vipData && (vipData.redplus || vipData.associator || vipData.redVipAnnualCount != null || vipData.vipType != null)) ||
+    Number.isFinite(Number(profile.vipType))
 
   const playlists = Array.isArray(playlistResult.body?.playlist)
     ? playlistResult.body.playlist.map((item: any) => ({
@@ -619,7 +653,7 @@ export async function getNeteaseLibrary() {
         kind: Number(item.userId) === Number(profile.userId) ? 'mine' : 'platform'
       }))
     : []
-  const albums = Array.isArray(albumResult.body?.albums)
+  const newestAlbums = Array.isArray(albumResult.body?.albums)
     ? albumResult.body.albums.map((item: any) => ({
         id: String(item.id),
         name: String(item.name || ''),
@@ -628,11 +662,24 @@ export async function getNeteaseLibrary() {
         kind: 'album'
       }))
     : []
+  // 专辑只留新碟这一路：墙上专辑只是补位，热门专辑那 50 张不值得多一次请求
+  const albumSeen = new Set<string>()
+  const albums: any[] = []
+  for (const item of newestAlbums) {
+    if (!item.id || albumSeen.has(item.id)) continue
+    albumSeen.add(item.id)
+    albums.push(item)
+  }
 
   const personalized = Array.isArray(recommendationResult.body?.result)
     ? recommendationResult.body.result.map(mapRecommendation)
     : []
-  const topPlaylists = topPlaylistList(topResult.body).map(mapRecommendation)
+  const topPlaylists = listResults.flatMap((page: any) => {
+    const list = topPlaylistList(page.body)
+    // 每个榜单实际拿到多少条一目了然；接口“成功返回但 0 条”是最隐蔽的池子缩水原因
+    console.log(`[网易云] 歌单榜单「${page.label}」返回 ${list.length} 条 (code=${page.body?.code})`)
+    return list
+  }).map(mapRecommendation)
 
   // 去重，并过滤掉已经出现在「我的歌单」里的条目
   const ownedIds = new Set(playlists.map((item: any) => item.id))
@@ -653,7 +700,30 @@ export async function getNeteaseLibrary() {
     }
   }
 
-  return { profile: { name: String(profile.nickname || ''), avatar: String(profile.avatarUrl || ''), level, vip }, playlists, albums, recommendations: recommendations.slice(0, RECOMMEND_LIMIT) }
+  // 推荐池没截满时用上次成功的缓存补足：接口偶发失败不至于让探索墙掉到只剩幽灵盘
+  let merged = recommendations.slice(0, RECOMMEND_LIMIT)
+  if (merged.length < RECOMMEND_LIMIT && homeFallback) {
+    const have = new Set(merged.map(item => item.id))
+    for (const item of homeFallback.recommendations) {
+      if (merged.length >= RECOMMEND_LIMIT) break
+      if (!have.has(item.id)) {
+        merged.push(item)
+        have.add(item.id)
+      }
+    }
+  }
+  // 拉得足够满才刷新缓存，失败轮不会用残缺数据覆盖好数据
+  if (merged.length >= RECOMMEND_LIMIT) {
+    homeFallback = { recommendations: merged, albums }
+  }
+  if (albums.length < 12 && homeFallback) {
+    const albumIds = new Set(albums.map(item => item.id))
+    for (const item of homeFallback.albums) {
+      if (!albumIds.has(item.id)) albums.push(item)
+    }
+  }
+
+  return { profile: { name: String(profile.nickname || ''), avatar: String(profile.avatarUrl || ''), level, vip, vipKnown }, playlists, albums, recommendations: merged }
 }
 
 export async function getNeteaseCollectionTracks(kind: string, collectionId: string) {
@@ -881,9 +951,13 @@ export async function searchNeteaseLyrics(name: string, singer = '', duration = 
   throw new Error('没有找到匹配的歌词')
 }
 
-export async function getNeteaseSongUrl(songId: string) {
+// 与官方客户端一致的音质档位；歌曲没有该档位时服务端会自动降级
+const SONG_LEVELS = ['standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'vivid']
+
+export async function getNeteaseSongUrl(songId: string, level = 'exhigh') {
   loadSession()
-  const { body } = await requestApi(`/song/url/v1?id=${encodeURIComponent(songId)}&level=exhigh&randomCNIP=true&https=true`, sessionCookie)
+  const safeLevel = SONG_LEVELS.includes(level) ? level : 'exhigh'
+  const { body } = await requestApi(`/song/url/v1?id=${encodeURIComponent(songId)}&level=${safeLevel}&randomCNIP=true&https=true`, sessionCookie)
   const song = body?.data?.[0]
   const url = String(song?.url || '')
   if (Number(body?.code) !== 200 || !url) throw new Error(body?.msg || '这首歌暂时无法播放（可能需要会员或版权受限）')
@@ -892,5 +966,10 @@ export async function getNeteaseSongUrl(songId: string) {
   const trialSeconds = Number.isFinite(trialEnd) && trialEnd > 0
     ? Math.max(1, Math.round(trialEnd - (Number.isFinite(trialStart) ? trialStart : 0)))
     : 0
-  return { url: url.replace(/^http:/, 'https:'), trialSeconds }
+  return {
+    url: url.replace(/^http:/, 'https:'),
+    trialSeconds,
+    // 服务端可能降级，回传实际档位与码率供界面提示
+    quality: { level: String(song?.level || safeLevel), bitrate: Number(song?.br) || 0 }
+  }
 }

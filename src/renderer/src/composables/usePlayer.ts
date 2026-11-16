@@ -27,6 +27,9 @@ const state = reactive<PlayerState>({
   audioUrl: '', coverUrl: '', lyric: '', tlyric: '', yrc: '', ytlyric: '', isLoading: false
 })
 const playMode = ref<PlayMode>('sequence')
+// 音质偏好由歌词页的音质菜单写入，取播放地址时随平台一起传给主进程
+export type QualityPlatform = 'netease' | 'soda'
+const qualityPrefs: Record<QualityPlatform, string> = { netease: 'exhigh', soda: 'highest' }
 const spectrum = new Uint8Array(64)
 const audio = new Audio()
 audio.preload = 'none'
@@ -159,7 +162,8 @@ export function usePlayer() {
     const requestId = ++playRequestId
     state.isLoading = true
     try {
-      const result = await window.api.playerPlay(track.songmid, track.platform || 'netease')
+      const platform = track.platform === 'soda' ? 'soda' : 'netease'
+      const result = await window.api.playerPlay(track.songmid, platform, qualityPrefs[platform])
       if (requestId !== playRequestId) return
       if (!result?.success) throw new Error(result?.error || '歌曲播放失败')
       const { url, trialSeconds = 0 } = result.data as { url: string; trialSeconds?: number }
@@ -184,6 +188,52 @@ export function usePlayer() {
       state.audioUrl = url
       state.coverUrl = track.img || ''
       if (trialSeconds > 0) window.dispatchEvent(new CustomEvent('playback-trial', { detail: trialSeconds }))
+    } finally {
+      if (requestId === playRequestId) state.isLoading = false
+    }
+  }
+
+  // 切换音质：记住偏好；正在播放同一平台时重新拉流并从原位置续播
+  const setQualityPreference = (platform: QualityPlatform, value: string) => { qualityPrefs[platform] = value }
+  const switchQuality = async (platform: QualityPlatform, value: string) => {
+    setQualityPreference(platform, value)
+    const track = state.currentTrack
+    if (!track || !state.audioUrl) return null
+    if ((track.platform === 'soda' ? 'soda' : 'netease') !== platform) return null
+
+    const requestId = ++playRequestId
+    state.isLoading = true
+    try {
+      const result = await window.api.playerPlay(track.songmid, platform, value)
+      if (requestId !== playRequestId) return null
+      if (!result?.success) throw new Error(result?.error || '音质切换失败')
+      const { url, trialSeconds = 0, quality = null } = result.data as {
+        url: string
+        trialSeconds?: number
+        quality?: { level: string; bitrate: number } | null
+      }
+      // 平台只有更低档位时地址可能完全一致，避免无谓地重新加载
+      if (url !== state.audioUrl) {
+        // 取流期间歌还在继续播，位置和播放状态要按换源这一刻重新取
+        const position = audio.currentTime
+        const wasPlaying = !audio.paused
+        stopPauseFade()
+        audio.src = url
+        audio.volume = state.volume
+        state.audioUrl = url
+        const applyPosition = () => {
+          const limit = trialSeconds > 0 ? trialSeconds : state.duration
+          const target = limit > 0 ? Math.min(position, limit) : position
+          try { audio.currentTime = target } catch { /* 元数据未就绪时跳过，播放后仍从 0 开始 */ }
+          lastAudioPosition = target
+          state.currentTime = target
+        }
+        if (audio.readyState >= 1) applyPosition()
+        else audio.addEventListener('loadedmetadata', applyPosition, { once: true })
+        if (wasPlaying) await audio.play()
+      }
+      state.trialSeconds = trialSeconds
+      return quality
     } finally {
       if (requestId === playRequestId) state.isLoading = false
     }
@@ -244,7 +294,7 @@ export function usePlayer() {
   const setPlayMode = (mode: PlayMode) => { playMode.value = mode }
 
   return {
-    state, play, pause, resume, togglePlay, stop, seek, setVolume, setCover, setLyric, setLoading,
+    state, play, pause, resume, togglePlay, stop, seek, setVolume, setCover, setLyric, setLoading, switchQuality, setQualityPreference,
     // 歌词染色需要比 timeupdate 更细的进度
     getCurrentTime: () => audio.currentTime,
     playMode, setPlayMode, getFrequencyData: () => spectrum, getAudioEnergy: () => 0

@@ -66,7 +66,46 @@
             <TransportIcon :playing="playing" :size="19" />
           </button>
           <button aria-label="下一首" @click="emit('next')"><SkipForward :size="18" /></button>
-          <button title="播放队列" aria-label="播放队列" @click="emit('toggle-queue')"><ListMusic :size="16" /></button>
+          <div class="quality-wrap">
+            <button
+              class="quality-btn"
+              :class="{ on: qualityOpen }"
+              :title="`音质：${currentQualityLabel}`"
+              :aria-label="`音质：${currentQualityLabel}`"
+              :aria-expanded="qualityOpen"
+              @click="qualityOpen = !qualityOpen"
+            ><AudioLines :size="16" /></button>
+            <transition name="quality-pop">
+              <div v-if="qualityOpen" class="quality-menu" role="menu" :aria-label="`${platformLabel}音质`">
+                <button
+                  v-for="option in qualityOptions"
+                  :key="option.value"
+                  class="quality-menu-item"
+                  :class="{ active: option.value === quality, 'with-icon': option.icon }"
+                  role="menuitemradio"
+                  :aria-checked="option.value === quality"
+                  @click="chooseQuality(option.value)"
+                >
+                  <span v-if="option.icon" class="quality-icon" :class="`qi-${option.icon}`">
+                    <Pyramid v-if="option.icon === 'vivid'" :size="13" />
+                    <ChartNoAxesColumnIncreasing v-else-if="option.icon === 'spatial'" :size="13" />
+                    <template v-else>{{ option.icon === 'sq' ? 'SQ' : option.icon === 'hq' ? 'HQ' : '标' }}</template>
+                  </span>
+                  <span v-else class="quality-icon quality-icon-empty" aria-hidden="true"></span>
+                  <span class="quality-menu-text">
+                    <span class="quality-menu-line">
+                      <span class="quality-menu-name">{{ option.label }}</span>
+                      <em v-if="option.alias" class="quality-menu-alias mono">{{ option.alias }}</em>
+                      <i v-if="option.vip" class="quality-vip-badge mono">{{ vipBadge(option.vip) }}</i>
+                    </span>
+                    <span v-if="option.hint" class="quality-menu-hint">{{ option.hint }}</span>
+                  </span>
+                  <Check v-if="option.value === quality" :size="13" class="quality-check" />
+                </button>
+              </div>
+            </transition>
+            <div v-if="qualityOpen" class="quality-veil" @click="qualityOpen = false"></div>
+          </div>
           <div
             class="volume-wrap"
             @mouseenter="openVolume"
@@ -114,11 +153,12 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { AudioLines, ChevronLeft, Heart, ListMusic, ListOrdered, Maximize2, Minimize2, Music2, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Subtitles, Volume2, VolumeX } from '@lucide/vue'
+import { AudioLines, ChartNoAxesColumnIncreasing, Check, ChevronLeft, Heart, ListOrdered, Maximize2, Minimize2, Music2, Pyramid, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Subtitles, Volume2, VolumeX } from '@lucide/vue'
 import type { PlayMode } from '../composables/usePlayer'
 import KaraokeLine from './KaraokeLine.vue'
 import TransportIcon from './TransportIcon.vue'
 import { fallbackCoverOnError } from '../utils/cover'
+import { NETEASE_QUALITY_OPTIONS, SODA_QUALITY_OPTIONS, qualityLabel, vipBadge } from '../utils/quality'
 
 interface KaraokeWord { time: number; duration: number; text: string }
 interface LyricLine { time: number; text: string; translation: string; words: KaraokeWord[] }
@@ -139,6 +179,9 @@ const props = defineProps<{
   volume: number
   mode: PlayMode
   modeTitle: string
+  // 音质菜单只展示当前歌曲所属平台的档位
+  platform: 'netease' | 'soda'
+  quality: string
 }>()
 
 const emit = defineEmits<{
@@ -151,9 +194,9 @@ const emit = defineEmits<{
   next: []
   'toggle-favorite': []
   'cycle-mode': []
-  'toggle-queue': []
   mute: []
   volume: [value: number]
+  'select-quality': [value: string]
 }>()
 
 // 播放模式图标与播放条同一套映射
@@ -163,6 +206,28 @@ const modeIconComponent = computed(() => {
   if (props.mode === 'repeat-all') return Repeat
   return ListOrdered
 })
+
+/* ---- 音质：按当前歌曲所属平台给档位，选了才发事件，由 App 处理重载与 toast ---- */
+const qualityOpen = ref(false)
+const qualityOptions = computed(() => props.platform === 'soda' ? SODA_QUALITY_OPTIONS : NETEASE_QUALITY_OPTIONS)
+const platformLabel = computed(() => props.platform === 'soda' ? '汽水' : '网易云')
+const currentQualityLabel = computed(() => props.platform === 'soda'
+  ? qualityLabel(SODA_QUALITY_OPTIONS, props.quality)
+  : qualityLabel(NETEASE_QUALITY_OPTIONS, props.quality))
+
+function chooseQuality(value: string) {
+  qualityOpen.value = false
+  if (value !== props.quality) emit('select-quality', value)
+}
+
+// 菜单开着时 Esc 只收起菜单，不连带退出歌词页
+function onQualityKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !qualityOpen.value) return
+  event.stopImmediatePropagation()
+  qualityOpen.value = false
+}
+onMounted(() => window.addEventListener('keydown', onQualityKeydown, true))
+onBeforeUnmount(() => window.removeEventListener('keydown', onQualityKeydown, true))
 
 const progressPercent = computed(() => props.duration ? Math.min(100, props.currentTime / props.duration * 100) : 0)
 // VIP 试听截止点与播放条一致，压在进度条上
@@ -332,6 +397,101 @@ onMounted(async () => {
   color: #fff !important;
   box-shadow: 0 10px 26px rgba(70, 55, 110, 0.2), 0 0 22px var(--accent-live-glow);
 }
+
+/* ---- 音质菜单：占据原播放队列按钮的位置，向上展开 ---- */
+.quality-wrap { position: relative; display: grid; place-items: center; }
+.quality-btn.on { color: var(--amber); }
+.quality-veil { position: fixed; inset: 0; z-index: 40; }
+.quality-menu {
+  position: absolute;
+  right: -12px;
+  bottom: calc(100% + 14px);
+  z-index: 41;
+  width: 272px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.34);
+  box-shadow: 0 18px 44px rgba(70, 55, 110, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(34px) saturate(1.35);
+  -webkit-backdrop-filter: blur(34px) saturate(1.35);
+}
+.lyrics-controls .quality-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 9px;
+  color: var(--text-muted);
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  text-align: left;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.lyrics-controls .quality-menu-item.with-icon { padding: 7px 10px; }
+.lyrics-controls .quality-menu-item:hover {
+  background: rgba(255, 255, 255, 0.62);
+  color: #191722;
+  transform: none;
+}
+.lyrics-controls .quality-menu-item.active { color: var(--accent-live); }
+.quality-menu-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.quality-menu-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.quality-menu-name { font-size: 13px; white-space: nowrap; }
+.quality-menu-alias {
+  color: var(--text-ghost);
+  font-size: 9px;
+  font-style: normal;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.quality-menu-hint {
+  overflow: hidden;
+  color: var(--text-ghost);
+  font-size: 9.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.quality-check { flex-shrink: 0; }
+.quality-icon {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.qi-vivid { background: rgba(212, 168, 83, 0.22); color: #9a6a08; }
+.qi-spatial { background: rgba(229, 140, 157, 0.18); color: #b96278; }
+.qi-sq { background: rgba(207, 46, 63, 0.12); color: #cf2e3f; }
+.qi-hq { background: rgba(70, 55, 110, 0.1); color: #6f6884; }
+.qi-std { background: rgba(70, 55, 110, 0.08); color: #8a8499; }
+.quality-icon-empty { background: transparent; }
+.quality-vip-badge {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #2b2320;
+  color: #f3e2c2;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.3;
+}
+.quality-pop-enter-active, .quality-pop-leave-active { transition: opacity 0.16s ease, transform 0.16s ease; }
+.quality-pop-enter-from, .quality-pop-leave-to { opacity: 0; transform: translateY(6px); }
 
 /* ---- 进度条：与播放条同款填充滑轨，尺寸放大匹配沉浸页 ---- */
 /* 数字贴近滑轨：间距收紧后滑轨自然更长 */

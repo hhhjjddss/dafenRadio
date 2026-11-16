@@ -777,17 +777,19 @@ app.whenReady().then(() => {
     try { await logoutNetease(); return { success: true } }
     catch (error: any) { return { success: false, error: error.message } }
   })
-  // 播放地址按平台分流：汽水目前只有匿名试听片段
-  ipcMain.handle('player:play', async (_, songId: string, platform: string) => {
+  // 播放地址按平台分流；音质偏好由渲染进程传入，平台缺该档位时会自动降级
+  ipcMain.handle('player:play', async (_, songId: string, platform: string, quality?: string) => {
     try {
-      const data = platform === 'soda' ? await getSodaSongUrl(songId) : await getNeteaseSongUrl(songId)
+      const data = platform === 'soda'
+        ? await getSodaSongUrl(songId, quality)
+        : await getNeteaseSongUrl(songId, quality)
       return { success: true, data }
     } catch (error: any) { return { success: false, error: error.message } }
   })
 
   // 汽水音乐：推荐（需登录）、歌单、歌单搜索、歌词
   ipcMain.handle('soda:recommend', async (_, force?: boolean) => {
-    try { return { success: true, data: await getSodaRecommendations(50, Boolean(force)) } }
+    try { return { success: true, data: await getSodaRecommendations(60, Boolean(force)) } }
     catch (error: any) { return { success: false, error: error.message } }
   })
   ipcMain.handle('soda:feed', async (_, count = 50) => {
