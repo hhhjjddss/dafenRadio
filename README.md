@@ -20,7 +20,7 @@
 ![](https://p.sda1.dev/36/9ccb4466ec44633ec9a0787aad39ee03/image.png)
 
 ![](https://p.sda1.dev/36/7569af61f0224aa78084e251d63f68db/image.png)
-22
+
 ### 探索画布
 
 - 格阵 / 行云 / 左倾 / 右倾 四种排布，可随时切换
