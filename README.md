@@ -15,7 +15,7 @@
 
 采用液态玻璃设计语言，光影随封面流动，视觉沉浸。
 
-![](https://p.sda1.dev/36/2b8f373cff845c932ed04f60880e37a1/image.png)
+![](https://p.sda1.dev/36/4cc8309163d846bc5a9d22a05fa53306/image.png)
 
 ![](https://p.sda1.dev/36/fdf551072770e47b0cc78b01411afec7/image.png)
 
