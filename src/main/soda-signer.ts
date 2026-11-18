@@ -91,7 +91,6 @@ function serveAssets(): Promise<number> {
         const body = readFileSync(join(app.getAppPath(), 'resources', 'soda-signer', name))
         res.writeHead(200, {
           'Content-Type': name.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/javascript; charset=utf-8',
-          'Access-Control-Allow-Origin': '*',
           'Cache-Control': 'no-store'
         })
         res.end(body)
@@ -133,9 +132,12 @@ function readJsonBody(req: IncomingMessage): Promise<any> {
 async function handleVerifyBridge(pathname: string, req: IncomingMessage, res: ServerResponse) {
   const send = (status: number, payload: unknown) => {
     if (res.headersSent) return
+    // 只允许签名页自身来源读取响应，避免本机任意网页借桥代发带登录态的请求
+    const origin = String(req.headers.origin || '')
+    const sameOrigin = !origin || origin === `http://${req.headers.host}`
     res.writeHead(status, {
       'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*',
+      ...(origin && sameOrigin ? { 'Access-Control-Allow-Origin': origin } : {}),
       'Cache-Control': 'no-store'
     })
     res.end(JSON.stringify(payload))

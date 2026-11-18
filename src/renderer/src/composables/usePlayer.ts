@@ -90,6 +90,8 @@ audio.addEventListener('pause', () => { state.isPlaying = false })
 audio.addEventListener('ended', () => {
   state.isPlaying = false
   finishListening()
+  // 切歌取流期间旧音源仍在播，它播完不代表当前曲目结束，否则会把刚点的歌取消
+  if (state.isLoading) return
   if (playMode.value === 'repeat-one' && state.currentTrack) {
     audio.currentTime = 0
     resetListening()
@@ -99,9 +101,32 @@ audio.addEventListener('ended', () => {
   const next = playlist.peekNextTrack(playMode.value)
   if (next) window.dispatchEvent(new CustomEvent('track-ended', { detail: next }))
 })
+// 播放中途音源失效（汽水签名链接过期等）：先让上层换一份新地址重试一次，再次失败才提示
+let recoverPlayback: (() => void) | null = null
+let recoveryAttempted = false
+let lastAudioErrorAt = 0
+// 首次加载失败由 play() / switchQuality() 自己重试并上报，这期间元素级报错不再重复提示
+let loadingGuardUntil = 0
+const LOADING_GUARD_MS = 2000
+
+function emitAudioError(message = '音频加载失败，请稍后重试') {
+  const now = Date.now()
+  if (now - lastAudioErrorAt < 1000) return
+  lastAudioErrorAt = now
+  window.dispatchEvent(new CustomEvent('audio-error', { detail: message }))
+}
+
 audio.addEventListener('error', () => {
-  if (!audio.getAttribute('src')) return
-  window.dispatchEvent(new CustomEvent('audio-error', { detail: '音频加载失败，请稍后重试' }))
+  // 切歌时旧音源的迟到报错会带不到 MediaError，忽略它避免误重试；
+  // 只有报错的就是当前音源时才走自动换源，首次加载失败由 play() 自己重试
+  if (!audio.getAttribute('src') || !audio.error) return
+  if (Date.now() < loadingGuardUntil) return
+  if (!recoveryAttempted && recoverPlayback && state.audioUrl && audio.getAttribute('src') === state.audioUrl) {
+    recoveryAttempted = true
+    recoverPlayback()
+    return
+  }
+  emitAudioError()
 })
 
 // 暂停前把音量淡到 0，避免声音被硬生生掐断
@@ -158,40 +183,101 @@ function playErrorMessage(error: any) {
 export function usePlayer() {
   let playRequestId = 0
 
-  const play = async (track: MusicInfo) => {
+  const play = async (track: MusicInfo): Promise<boolean> => {
     const requestId = ++playRequestId
+    recoveryAttempted = false
     state.isLoading = true
     try {
       const platform = track.platform === 'soda' ? 'soda' : 'netease'
-      const result = await window.api.playerPlay(track.songmid, platform, qualityPrefs[platform])
-      if (requestId !== playRequestId) return
-      if (!result?.success) throw new Error(result?.error || '歌曲播放失败')
-      const { url, trialSeconds = 0 } = result.data as { url: string; trialSeconds?: number }
+      type PlaySource = { url: string; trialSeconds?: number }
+      const fetchSource = async (force: boolean): Promise<PlaySource | null> => {
+        const result = await window.api.playerPlay(track.songmid, platform, qualityPrefs[platform], force)
+        if (requestId !== playRequestId) return null
+        if (!result?.success) throw new Error(result?.error || '歌曲播放失败')
+        return result.data as PlaySource
+      }
+      let source = await fetchSource(false)
+      if (!source) return false
       // 切歌时取消还在进行的暂停淡出，否则旧音源可能刚被淡停、新音源又被它掐掉
       stopPauseFade()
-      audio.src = url
+      loadingGuardUntil = Date.now() + LOADING_GUARD_MS
+      audio.src = source.url
       audio.volume = state.volume
       try {
         await audio.play()
       } catch (error) {
-        if (requestId !== playRequestId) return
-        const message = playErrorMessage(error)
-        if (!message) return
-        throw new Error(message)
+        if (requestId !== playRequestId) return false
+        const name = String((error as any)?.name || '')
+        // 汽水的签名音源可能拿到后立刻失效：绕过缓存换一份新地址再试一次
+        if (platform !== 'soda' || name === 'NotAllowedError' || name === 'AbortError') {
+          const message = playErrorMessage(error)
+          if (!message) return false
+          throw new Error(message)
+        }
+        const retry = await fetchSource(true)
+        if (!retry) return false
+        audio.src = retry.url
+        audio.volume = state.volume
+        try {
+          await audio.play()
+        } catch (retryError) {
+          if (requestId !== playRequestId) return false
+          const message = playErrorMessage(retryError)
+          if (!message) return false
+          throw new Error(message)
+        }
+        source = retry
       }
-      if (requestId !== playRequestId) { audio.pause(); return }
+      // 序号失配说明已有更新的播放请求接管，这里不要暂停共享的 audio，否则会掐掉新歌
+      if (requestId !== playRequestId) return false
+      const trialSeconds = source.trialSeconds || 0
       state.currentTrack = track
       resetListening()
       state.currentTime = 0
       state.duration = Number(track.duration) || trialSeconds || 0
       state.trialSeconds = trialSeconds
-      state.audioUrl = url
+      state.audioUrl = source.url
       state.coverUrl = track.img || ''
       if (trialSeconds > 0) window.dispatchEvent(new CustomEvent('playback-trial', { detail: trialSeconds }))
+      return true
     } finally {
       if (requestId === playRequestId) state.isLoading = false
     }
   }
+
+  // 播放中途音源报错：汽水换一份新地址从当前进度续上，其它平台直接提示
+  const recoverCurrentSource = async () => {
+    const track = state.currentTrack
+    if (!track || track.platform !== 'soda') { emitAudioError(); return }
+    const requestId = playRequestId
+    const resumeAt = audio.currentTime || 0
+    const wasPlaying = !audio.paused
+    state.isLoading = true
+    try {
+      const result = await window.api.playerPlay(track.songmid, 'soda', qualityPrefs.soda, true)
+      if (requestId !== playRequestId) return
+      if (!result?.success) throw new Error(result?.error || '歌曲播放失败')
+      const source = result.data as { url: string; trialSeconds?: number }
+      audio.src = source.url
+      audio.volume = state.volume
+      state.audioUrl = source.url
+      state.trialSeconds = source.trialSeconds || 0
+      if (resumeAt > 0) {
+        const apply = () => {
+          if (requestId !== playRequestId) return
+          try { audio.currentTime = resumeAt } catch { /* 元数据未就绪时忽略 */ }
+        }
+        if (audio.readyState >= 1) apply()
+        else audio.addEventListener('loadedmetadata', apply, { once: true })
+      }
+      if (wasPlaying) await audio.play()
+    } catch {
+      if (requestId === playRequestId) emitAudioError()
+    } finally {
+      if (requestId === playRequestId) state.isLoading = false
+    }
+  }
+  recoverPlayback = () => { void recoverCurrentSource() }
 
   // 切换音质：记住偏好；正在播放同一平台时重新拉流并从原位置续播
   const setQualityPreference = (platform: QualityPlatform, value: string) => { qualityPrefs[platform] = value }
@@ -202,6 +288,7 @@ export function usePlayer() {
     if ((track.platform === 'soda' ? 'soda' : 'netease') !== platform) return null
 
     const requestId = ++playRequestId
+    recoveryAttempted = false
     state.isLoading = true
     try {
       const result = await window.api.playerPlay(track.songmid, platform, value)
@@ -217,11 +304,16 @@ export function usePlayer() {
         // 取流期间歌还在继续播，位置和播放状态要按换源这一刻重新取
         const position = audio.currentTime
         const wasPlaying = !audio.paused
+        const previousUrl = state.audioUrl
+        const previousTrialSeconds = state.trialSeconds
+        const previousDuration = state.duration
         stopPauseFade()
+        loadingGuardUntil = Date.now() + LOADING_GUARD_MS
         audio.src = url
         audio.volume = state.volume
         state.audioUrl = url
         const applyPosition = () => {
+          if (requestId !== playRequestId) return
           const limit = trialSeconds > 0 ? trialSeconds : state.duration
           const target = limit > 0 ? Math.min(position, limit) : position
           try { audio.currentTime = target } catch { /* 元数据未就绪时跳过，播放后仍从 0 开始 */ }
@@ -230,7 +322,26 @@ export function usePlayer() {
         }
         if (audio.readyState >= 1) applyPosition()
         else audio.addEventListener('loadedmetadata', applyPosition, { once: true })
-        if (wasPlaying) await audio.play()
+        if (wasPlaying) {
+          try {
+            await audio.play()
+          } catch (error) {
+            // 新音源不可用：回到原地址与原进度，音质偏好保留给下一首
+            if (requestId !== playRequestId) throw error
+            audio.src = previousUrl
+            audio.volume = state.volume
+            state.audioUrl = previousUrl
+            state.trialSeconds = previousTrialSeconds
+            state.duration = previousDuration
+            lastAudioPosition = position
+            state.currentTime = position
+            loadingGuardUntil = Date.now() + LOADING_GUARD_MS
+            if (audio.readyState >= 1) { try { audio.currentTime = position } catch { /* 忽略 */ } }
+            else audio.addEventListener('loadedmetadata', () => { try { audio.currentTime = position } catch { /* 忽略 */ } }, { once: true })
+            await audio.play().catch(() => { /* 原音源恢复失败时保持暂停 */ })
+            throw error
+          }
+        }
       }
       state.trialSeconds = trialSeconds
       return quality

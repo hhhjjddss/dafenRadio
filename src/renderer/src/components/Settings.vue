@@ -28,6 +28,23 @@
         <section class="settings-group">
           <div class="setting-row">
             <div class="setting-copy">
+              <strong>歌单照片墙</strong>
+              <small>歌单详情里的歌曲改用封面格阵展示</small>
+            </div>
+            <button
+              class="toggle"
+              :class="{ on: collectionWall }"
+              role="switch"
+              :aria-checked="collectionWall"
+              aria-label="歌单照片墙"
+              @click="emit('update:collection-wall', !collectionWall)"
+            ><i></i></button>
+          </div>
+        </section>
+
+        <section class="settings-group">
+          <div class="setting-row">
+            <div class="setting-copy">
               <strong>开机自动播放</strong>
               <small>启动后自动用心动模式 / 平台推荐开始放歌</small>
             </div>
@@ -113,6 +130,7 @@ import { LoaderCircle, SlidersHorizontal, Trash2, X } from '@lucide/vue'
 
 defineProps<{
   coverPalette: boolean
+  collectionWall: boolean
   alwaysOnTop: boolean
   autoPlay: boolean
   powerSave: boolean
@@ -121,6 +139,7 @@ defineProps<{
 const emit = defineEmits<{
   close: []
   'update:cover-palette': [enabled: boolean]
+  'update:collection-wall': [enabled: boolean]
   'update:always-on-top': [enabled: boolean]
   'update:auto-play': [enabled: boolean]
   'update:power-save': [enabled: boolean]
@@ -265,8 +284,9 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow-y: auto;
   padding: 4px 12px 8px;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
+.settings-scroll::-webkit-scrollbar { display: none; }
 .settings-group {
   padding: 10px 8px 2px;
   border-bottom: 1px solid rgba(70, 55, 110, 0.06);

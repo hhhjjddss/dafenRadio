@@ -47,6 +47,7 @@ export function fallbackCoverOnError(event: Event) {
 const LOAD_CONCURRENCY = 6
 let activeLoads = 0
 const loadWaiting: (() => void)[] = []
+const loadedCovers = new Set<string>()
 
 function acquireLoadSlot(): Promise<void> {
   return new Promise(resolve => {
@@ -66,6 +67,8 @@ function releaseLoadSlot() {
 }
 
 export function loadCover(url: string) {
+  // 同一张封面解码过一次就不再重复下载解码（照片墙/列表来回切换时最明显）
+  if (loadedCovers.has(url)) return Promise.resolve()
   return new Promise<void>(resolve => {
     let settled = false
     let timer = 0
@@ -76,6 +79,7 @@ export function loadCover(url: string) {
       settled = true
       clearTimeout(timer)
       releaseLoadSlot()
+      if (image.complete && image.naturalWidth > 0) loadedCovers.add(url)
       resolve()
     }
 

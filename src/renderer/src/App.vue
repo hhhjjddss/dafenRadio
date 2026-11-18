@@ -74,13 +74,19 @@
                   :loading="exploreLoading"
                   :guide="showOnboarding"
                   :queue-open="queuePeek"
-                  @play-track="playTrack"
+                  :collection-wall="collectionWall"
+                  :current-songmid="playerState.currentTrack?.songmid || ''"
+                  :playing="playerState.isPlaying"
+                  :playing-collection-id="playSourceId"
+                  @play-track="playExploreTrack"
+                  @toggle-play="togglePlay"
                   @accent="handleExploreAccent"
                   @open-platform="handleExploreConnect"
                   @open-login="openLogin(activePlatform)"
                   @auth-error="handleAuthError(activePlatform, $event)"
                   @collection-open="handleCollectionOpen"
-                  @collection-close="exploreDetailOpen = false"
+                  @collection-close="closeExploreDetail"
+                  @refresh-favorites="refreshActiveFavorites"
                 />
 
                 <!-- 我的音乐 / 歌单：全部原页显示，歌单详情用与探索页同一块展开层 -->
@@ -105,17 +111,21 @@
               v-if="collectionDetail"
               class="page-fixed"
               :name="collectionDetail.name"
-              :cover="collectionDetail.cover"
-              kind="playlist"
+              :cover="collectionLiked && collectionTracks.length ? likedCollectionCover : collectionDetail.cover"
+              :kind="collectionLiked ? 'favorites' : 'playlist'"
               :tracks="collectionTracks"
               :loading="collectionLoading"
               :error="collectionError"
               :queue-open="queuePeek"
+              :wall="collectionWall"
+              :current-songmid="playerState.currentTrack?.songmid || ''"
+              :playing="playerState.isPlaying"
               :fallback-cover="fallbackCover"
               :accent="palette.accent"
               :glow="palette.glow"
               @close="closeCollection"
               @play-track="playCollectionTrack"
+              @toggle-play="togglePlay"
             />
 
             <MiniPlayer
@@ -123,6 +133,7 @@
               :track="playerState.currentTrack"
               :cover-url="playerState.coverUrl"
               :playing="playerState.isPlaying"
+              :loading="playerState.isLoading"
               :current-time="playerState.currentTime"
               :duration="playerState.duration"
               :trial-limit="playerState.trialSeconds"
@@ -168,6 +179,7 @@
         :artist="playerState.currentTrack?.singer || ''"
         :cover-url="playerState.coverUrl"
         :playing="playerState.isPlaying"
+        :loading="playerState.isLoading"
         :favorite="currentIsFavorite"
         :lyric-bar-on="lyricBarOn"
         :fullscreen="isFullscreen"
@@ -218,11 +230,13 @@
     <Settings
       v-if="showSettings"
       :cover-palette="coverPaletteEnabled"
+      :collection-wall="collectionWall"
       :always-on-top="alwaysOnTop"
       :auto-play="autoPlayRecommended"
       :power-save="powerSave"
       @close="showSettings = false"
       @update:cover-palette="setCoverPalette"
+      @update:collection-wall="setCollectionWall"
       @update:always-on-top="toggleAlwaysOnTop"
       @update:auto-play="setAutoPlayRecommended"
       @update:power-save="setPowerSave"
@@ -298,7 +312,8 @@ import { usePlayer, type PlayMode } from './composables/usePlayer'
 import { useFavorites } from './composables/useFavorites'
 import { usePlaylist } from './composables/usePlaylist'
 import { parseLrc, parseYrc } from './utils/lyrics'
-import { FALLBACK_COVER } from './utils/cover'
+import { FALLBACK_COVER, neteaseThumb } from './utils/cover'
+import { isLikedPlaylistName, mergeLikedTracks } from './utils/liked'
 import { NETEASE_QUALITY_OPTIONS, NETEASE_QUALITY_STORAGE, SODA_QUALITY_OPTIONS, SODA_QUALITY_STORAGE, meetsVip, qualityLabel, readStoredQuality, vipBadge, type NeteaseQuality, type SodaQuality } from './utils/quality'
 import { AlertCircle, Check, Heart, Music2 } from '@lucide/vue'
 
@@ -321,7 +336,7 @@ watch(playMode, (mode) => {
   try { localStorage.setItem('dafen:play-mode', mode) } catch { /* 忽略存储异常 */ }
 })
 const { favoritesFor, isFavorite, toggleFavorite, replaceFavorites } = useFavorites()
-const { setPlayQueue, commitIndex, getCurrentInfo, getPrevTrack, getNextTrack } = usePlaylist()
+const { setPlayQueue, commitIndex, getCurrentInfo, peekNextTrack, peekPrevTrack } = usePlaylist()
 
 // 当前歌曲所属平台决定歌词页展示哪一套音质档位
 const currentTrackPlatform = computed<PlatformKey>(() => playerState.currentTrack?.platform === 'soda' ? 'soda' : 'netease')
@@ -390,6 +405,8 @@ const platformOpen = ref(false)
 // 顶栏按钮组一键收起：收起后仅剩箭头按钮与头像；每次启动默认收起
 const toolbarFolded = ref(true)
 const coverPaletteEnabled = ref(localStorage.getItem('dafen:cover-palette') !== '0')
+// 歌单详情照片墙：歌曲用封面格阵展示（默认开启，设置里可切回列表）
+const collectionWall = ref(localStorage.getItem('dafen:collection-wall') !== '0')
 const alwaysOnTop = ref(localStorage.getItem('dafen:always-on-top') === '1')
 // 启动后自动进入心动模式/平台推荐流；默认开启，可在设置里关掉
 const autoPlayRecommended = ref(localStorage.getItem('dafen:auto-play-recommend') !== '0')
@@ -416,7 +433,12 @@ const sodaSearchResults = ref<Playlist[]>([])
 const sodaSearching = ref(false)
 const lyricLines = ref<LyricLine[]>([])
 const collectionDetail = ref<{ id: string; name: string; cover: string } | null>(null)
+// 当前播放的歌曲是从哪个歌单点开的：探索页格阵据此在对应歌单封面上标「正在播放」
+const playSourceId = ref('')
 const collectionTracks = ref<MusicInfo[]>([])
+// 红心歌单先展示本机收藏，账号歌单在后台补全后并入
+const collectionLiked = ref(false)
+const collectionServerTracks = ref<MusicInfo[]>([])
 const collectionLoading = ref(false)
 const collectionError = ref('')
 const queueTracks = ref<MusicInfo[]>([])
@@ -498,17 +520,30 @@ const exploreLoading = computed(() =>
 )
 // 收藏按平台隔离：网易云展示账号红心，汽水展示本机点亮的心
 const platformFavorites = computed(() => favoritesFor(activePlatform.value))
-// 「我喜欢的音乐」封面统一取收藏里第一首的封面，两个平台显示一致
+// 网易云红心详情页靠账号红心列表驱动（沿用原有合并方式）
+watch(platformFavorites, list => {
+  if (activePlatform.value !== 'netease') return
+  if (!collectionLiked.value || !collectionDetail.value) return
+  collectionTracks.value = mergeLikedTracks(list, collectionServerTracks.value)
+})
+// 汽水的红心详情页不走本地合并，收藏/取消后统一重拉账号歌单详情。
+// 「我喜欢的音乐」封面严格取收藏列表第一首，列表变了封面就跟着变，不跳过任何曲目。
 const activeLikedCover = computed(() => {
-  const list = platformFavorites.value
-  const track = list.find(item => !item.unavailable) || list[0]
+  const track = platformFavorites.value[0]
   if (track?.img) return track.img
   return activePlatform.value === 'netease' ? (likedPlaylist.value?.cover || '') : ''
+})
+// 收藏详情大封面 = 列表第一首的封面，严格跟随列表顺序，不跳过任何曲目
+const likedCollectionCover = computed(() => collectionTracks.value[0]?.img || '')
+// 收藏详情封面刷新后同步重取配色，避免封面换了但背景色还停在旧封面
+watch(likedCollectionCover, cover => {
+  if (collectionLiked.value && cover) void applyCoverPalette(cover)
 })
 const searchBusy = computed(() => activePlatform.value === 'soda' ? sodaSearching.value : searching.value)
 const currentIsFavorite = computed(() => {
   const track = playerState.currentTrack
-  return Boolean(track && isFavorite(track.songmid, track.platform || 'netease'))
+  if (!track) return false
+  return isFavorite(track.songmid, track.platform || 'netease')
 })
 const nextQueueTrack = computed(() => queueTracks.value[queueIndex.value + 1] || null)
 const nextQueueIndex = computed(() => queueIndex.value + 1)
@@ -551,7 +586,8 @@ async function applyCoverPalette(cover: string) {
   const requestId = ++paletteRequestId
   if (!coverPaletteEnabled.value || !cover) { palette.value = defaultPalette(); return }
   try {
-    const result = await window.api?.themePalette?.(cover)
+    // 取色只需要几十像素的采样，用缩略图避免主进程解码整张 1400px 封面
+    const result = await window.api?.themePalette?.(neteaseThumb(cover, '120y120'))
     if (requestId !== paletteRequestId) return
     if (result?.success && result.data) palette.value = result.data
   } catch { /* 取色失败时保留当前配色 */ }
@@ -576,7 +612,7 @@ watch([pageBackdropCovers, floatTop], async ([covers, onPage]) => {
     const cached = pageColorCache.get(cover)
     if (cached) return cached
     try {
-      const result = await window.api?.themePalette?.(cover)
+      const result = await window.api?.themePalette?.(neteaseThumb(cover, '120y120'))
       const accent = result?.success ? result.data?.accent : ''
       if (accent) pageColorCache.set(cover, accent)
       return accent || ''
@@ -597,6 +633,12 @@ function setCoverPalette(enabled: boolean) {
   try { localStorage.setItem('dafen:cover-palette', enabled ? '1' : '0') } catch { /* 忽略存储异常 */ }
   if (enabled) void applyCoverPalette(playerState.coverUrl)
   else { paletteRequestId++; palette.value = defaultPalette() }
+}
+
+// 设置：歌单详情照片墙（封面格阵）
+function setCollectionWall(enabled: boolean) {
+  collectionWall.value = enabled
+  try { localStorage.setItem('dafen:collection-wall', enabled ? '1' : '0') } catch { /* 忽略存储异常 */ }
 }
 
 // 设置：窗口置顶开关
@@ -696,6 +738,16 @@ function handleCollectionOpen(name: string) {
   // 详情页不显示折叠按钮，进入时先把工具组收起来，免得按钮压在列表上
   if (!toolbarFolded.value) foldToolbar(true)
   notify(`已进入「${name}」 · 按 ESC 退出`)
+}
+
+function closeExploreDetail() {
+  exploreDetailOpen.value = false
+}
+
+// 打开红心页时按当前平台同步账号红心，避免在手机上新增的收藏在本地迟到
+function refreshActiveFavorites() {
+  if (activePlatform.value === 'soda') void syncSodaLikedSongs()
+  else void syncLikedSongs()
 }
 
 /* ============ 歌词加载与高亮 ============ */
@@ -925,7 +977,16 @@ async function syncLikedSongs(): Promise<boolean> {
     const result = await window.api.neteaseLiked()
     if (epoch !== accountEpoch || requestId !== likedRequestId) return false
     if (!result.success) throw new Error(result.error || '读取我喜欢的音乐失败')
-    replaceFavorites(result.data as MusicInfo[])
+    let tracks = result.data as MusicInfo[]
+    // neteaseLiked 靠 /user/playlist 里找红心歌单，偶发找不到会返回空；
+    // 此时用资料库已识别出的红心歌单 id 直接拉详情兜底，避免红心镜像空、播放栏爱心不亮
+    if (!tracks.length && likedPlaylist.value?.id) {
+      const fallback = await window.api.neteaseCollection('playlist', likedPlaylist.value.id)
+      if (epoch !== accountEpoch || requestId !== likedRequestId) return false
+      if (!fallback.success) throw new Error(fallback.error || '读取我喜欢的音乐失败')
+      tracks = fallback.data as MusicInfo[]
+    }
+    replaceFavorites(tracks)
     return true
   } catch (error: any) {
     if (epoch === accountEpoch && requestId === likedRequestId) {
@@ -994,6 +1055,22 @@ async function loadSodaRecommendations(force = false) {
 
 let sodaAccountEpoch = 0
 
+async function syncSodaLikedSongs(): Promise<boolean> {
+  const epoch = sodaAccountEpoch
+  try {
+    const result = await window.api.sodaLiked()
+    if (epoch !== sodaAccountEpoch) return false
+    if (!result.success) throw new Error(result.error || '读取汽水红心失败')
+    replaceFavorites(result.data as MusicInfo[], 'soda')
+    return true
+  } catch (error: any) {
+    if (epoch === sodaAccountEpoch) {
+      console.warn('[Favorites] 同步汽水在线红心失败:', error?.message || error)
+    }
+    return false
+  }
+}
+
 async function loadSodaLibrary(epoch = sodaAccountEpoch): Promise<boolean> {
   try {
     const data = mapError(await window.api.sodaLibrary(), '暂时无法读取汽水音乐资料') as {
@@ -1061,6 +1138,8 @@ async function handleSodaConnected() {
     if (epoch !== sodaAccountEpoch) return
     // 过期提示已经由统一收口弹过，这里只补普通同步失败
     if (!ok && !sodaExpired.value) notify('已登录汽水音乐，部分资料同步失败，稍后可重试', 'error', 4200)
+    // 收藏改在线：登录后把账号红心拉回来，替换汽水的本地收藏
+    void syncSodaLikedSongs()
     if (activePlatform.value === 'soda') void loadSodaRecommendations()
   } finally {
     if (epoch === sodaAccountEpoch) sodaSyncing.value = false
@@ -1158,7 +1237,7 @@ async function refreshActiveData(platform: PlatformKey = activePlatform.value, f
   dataRefreshAt[platform] = Date.now()
   try {
     // 静默刷新失败时保留现有数据；凭据过期仍由 loadLibrary / loadSodaLibrary 统一提示
-    if (platform === 'soda') await loadSodaLibrary(sodaAccountEpoch)
+    if (platform === 'soda') await Promise.all([loadSodaLibrary(sodaAccountEpoch), syncSodaLikedSongs()])
     else await Promise.all([loadLibrary(true), syncLikedSongs()])
   } finally {
     dataRefreshing.delete(platform)
@@ -1227,8 +1306,9 @@ function goExplore() {
   exploreDetailOpen.value = false
   closeCollection()
   exploreRef.value?.reset()
-  // 回到主页时补一次数据：手机上新增的收藏/歌单要能在这里看到
-  void refreshActiveData()
+  // 回到探索页立即刷新红心与歌单封面：收藏时这里不实时改动，回到这里才同步最新数据。
+  // 必须 force 绕过 60s 节流，否则刚收藏完马上返回会命中节流、封面停在旧图。
+  void refreshActiveData(activePlatform.value, true)
 }
 
 function openSearch() {
@@ -1427,6 +1507,8 @@ function playSearchResults() {
 }
 
 function playSearchTrack(track: MusicInfo, index: number) {
+  // 从搜索里直接播单曲，不再算某个歌单在播
+  playSourceId.value = ''
   void playTrack(track, searchResults.value, index)
 }
 
@@ -1465,8 +1547,9 @@ async function playTrack(track: MusicInfo, queue: MusicInfo[] = [track], index =
   queueTracks.value = [...playableQueue]
   queueIndex.value = playIndex
   try {
-    await play(track)
-    commitIndex(playIndex)
+    // 被更新的播放请求取代时不会真正起播，此时不要提交索引
+    const started = await play(track)
+    if (started) commitIndex(playIndex)
   } catch (error: any) { reportPlaybackError(error, '歌曲暂时无法播放') }
 }
 
@@ -1481,9 +1564,30 @@ async function expandCollection(collection: { id: string; name: string; cover: s
   collectionDetail.value = { id: collection.id, name: collection.name, cover: collection.cover }
   collectionTracks.value = []
   collectionError.value = ''
-  collectionLoading.value = true
+  // 网易云按账号红心歌单 id 识别；汽水没有本地红心歌单，只认「我喜欢的音乐」这个账号歌单名
+  collectionLiked.value = platform === 'netease'
+    ? collection.id === likedPlaylist.value?.id
+    : isLikedPlaylistName(collection.name)
+  collectionServerTracks.value = []
   notify(`已进入「${collection.name}」 · 按 ESC 退出`)
   void applyCoverPalette(collection.cover)
+  // 红心歌单：网易云用账号红心列表，汽水直接重拉账号歌单详情（列表和封面都以服务端为准）
+  if (collectionLiked.value) {
+    if (platform === 'netease') {
+      collectionLoading.value = platformFavorites.value.length === 0
+      // 本地收藏为空时先盖骨架，同步结束（成功或失败）后必须复位，否则骨架会一直挂着
+      void syncLikedSongs().finally(() => {
+        if (requestId === collectionRequestId) collectionLoading.value = false
+      })
+      return
+    }
+    collectionLoading.value = true
+    void refreshLikedCollection(collection.id, requestId)
+    // 汽水红心详情直接读账号歌单，内存镜像同时补一次，爱心不用等下一次同步才亮
+    void syncSodaLikedSongs()
+    return
+  }
+  collectionLoading.value = true
   try {
     const request = platform === 'soda'
       ? window.api.sodaPlaylist(collection.id)
@@ -1501,19 +1605,64 @@ async function expandCollection(collection: { id: string; name: string; cover: s
   }
 }
 
+// 重新拉账号歌单详情，列表和封面都用服务端返回值，不做本地合并。
+// expect 表示本次收藏/取消后服务端列表应处于的状态：写入有同步延迟，重拉结果不符就稍后重试。
+async function refreshLikedCollection(
+  id: string,
+  requestId: number,
+  expect?: { songmid: string; liked: boolean }
+) {
+  const RETRY_DELAYS = [0, 400, 900, 1600, 2500]
+  for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt += 1) {
+    if (RETRY_DELAYS[attempt]) await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS[attempt]))
+    if (requestId !== collectionRequestId || !collectionLiked.value) return
+    try {
+      const tracks = mapError(await window.api.sodaPlaylist(id), '暂时无法刷新我喜欢的音乐') as MusicInfo[]
+      if (requestId !== collectionRequestId || !collectionLiked.value) return
+      collectionServerTracks.value = tracks
+      collectionTracks.value = tracks
+      // 没有期望值时只需刷一次；有期望值时等列表和刚才的收藏操作一致再停
+      if (!expect) return
+      const has = tracks.some(track => track.songmid === expect.songmid)
+      if (has === expect.liked) return
+    } catch (error: any) {
+      if (requestId !== collectionRequestId) return
+      const message = String(error?.message || '')
+      if (!handleAuthError('soda', message)) {
+        console.warn('[Favorites] 刷新汽水「我喜欢的音乐」失败:', message || error)
+      }
+      return
+    } finally {
+      if (attempt === 0 && requestId === collectionRequestId) collectionLoading.value = false
+    }
+  }
+}
+
 let collectionRequestId = 0
 function closeCollection() {
   if (!collectionDetail.value) return
   collectionRequestId++
   collectionDetail.value = null
   collectionTracks.value = []
+  collectionLiked.value = false
+  collectionServerTracks.value = []
   collectionLoading.value = false
   collectionError.value = ''
   void applyCoverPalette(playerState.coverUrl)
 }
 
 async function playCollectionTrack(track: MusicInfo, index: number) {
+  // 网易云红心在探索墙上的卡 id 固定为 liked，这里同步归一，播放时才能亮起均衡器
+  playSourceId.value = collectionLiked.value && activePlatform.value === 'netease'
+    ? 'liked'
+    : (collectionDetail.value?.id || '')
   await playTrack(track, collectionTracks.value, index)
+}
+
+// 探索页点歌：带上所属歌单 id，格阵据此给那张封面标「正在播放」
+function playExploreTrack(track: MusicInfo, queue: MusicInfo[], index: number, collectionId: string) {
+  playSourceId.value = collectionId
+  void playTrack(track, queue, index)
 }
 
 /* ============ 推荐播放 ============ */
@@ -1623,37 +1772,93 @@ async function startRecommendedPlayback(auto = false) {
   }
 }
 
+// 正在提交的收藏操作：同一首歌的请求回来前忽略重复点击
+const favoriteRequests = new Set<string>()
+
 async function toggleCurrentFavorite() {
   const track = playerState.currentTrack
   if (!track) return
-  const epoch = accountEpoch
+  const platform = track.platform === 'soda' ? 'soda' : 'netease'
+  const epoch = platform === 'soda' ? sodaAccountEpoch : accountEpoch
+  const connectedAccount = platform === 'soda' ? sodaConnected.value : connected.value
   const liked = currentIsFavorite.value
-  toggleFavorite(track)
-  notify(liked ? '已从收藏中移除' : '已加入我喜欢的音乐')
-  // 汽水曲目没有网易云对应项，只留在本地收藏
-  if (!connected.value || track.platform === 'soda') return
-  // 已连接账号时，心形按钮直接同步到网易云「我喜欢的音乐」
-  try {
-    const result = await window.api.neteaseLike(track.songmid, !liked)
-    if (!result.success) throw new Error(result.error || '网易云同步失败')
-  } catch (error: any) {
-    // 退出登录/切换账号后，迟到的失败结果不再改写本地收藏
-    if (epoch !== accountEpoch) return
-    const message = String(error?.message || '')
+  const target = !liked
+  // 收藏只在线提交：未连接账号时不给本地兜底，直接提示失败
+  if (!connectedAccount) {
+    notify(`请先连接${platform === 'soda' ? '汽水' : '网易云'}账号再收藏歌曲`, 'error')
+    return
+  }
+  // 同一首歌的收藏请求还没回来时忽略连点，避免 like/unlike 乱序把服务端和界面写反
+  const requestKey = `${platform}:${track.songmid}`
+  if (favoriteRequests.has(requestKey)) return
+  favoriteRequests.add(requestKey)
+  // 乐观更新：先立即点亮/熄灭爱心、刷新封面与列表，不等网络往返
+  const applyOptimistic = () => {
     toggleFavorite(track)
-    if (handleAuthError('netease', message)) return
-    notify(`网易云同步失败：${message || '请稍后重试'}`, 'error')
+    if (collectionDetail.value && collectionLiked.value && platform === activePlatform.value) {
+      collectionTracks.value = target
+        ? [track, ...collectionTracks.value.filter(item => item.songmid !== track.songmid)]
+        : collectionTracks.value.filter(item => item.songmid !== track.songmid)
+    }
+  }
+  const rollback = () => {
+    toggleFavorite(track)
+    if (collectionDetail.value && collectionLiked.value && platform === activePlatform.value) {
+      collectionTracks.value = target
+        ? collectionTracks.value.filter(item => item.songmid !== track.songmid)
+        : [track, ...collectionTracks.value.filter(item => item.songmid !== track.songmid)]
+    }
+  }
+
+  applyOptimistic()
+  notify(liked ? '已从收藏中移除' : '已加入我喜欢的音乐')
+  try {
+    const result = platform === 'soda'
+      ? await window.api.sodaLike(track.songmid, target)
+      : await window.api.neteaseLike(track.songmid, target)
+    if (!result.success) throw new Error(result.error || '在线红心同步失败')
+    // 在线成功后后台校正完整红心/歌单；汽水重拉账号歌单直到与本次操作一致
+    if (collectionDetail.value && collectionLiked.value && platform === activePlatform.value && platform === 'soda') {
+      void refreshLikedCollection(collectionDetail.value.id, collectionRequestId, { songmid: track.songmid, liked: target })
+    }
+    if (platform === 'soda') void syncSodaLikedSongs()
+    else void syncLikedSongs()
+  } catch (error: any) {
+    // 退出登录/切换账号后，迟到的失败结果不再改写收藏状态
+    if (epoch !== (platform === 'soda' ? sodaAccountEpoch : accountEpoch)) return
+    rollback()
+    const message = String(error?.message || '')
+    if (handleAuthError(platform, message)) return
+    notify(`${platform === 'soda' ? '汽水' : '网易云'}收藏失败：${message || '请检查网络后重试'}`, 'error')
+  } finally {
+    favoriteRequests.delete(requestKey)
   }
 }
 
 function playPrevious() {
-  const previous = getPrevTrack(playMode.value)
-  if (previous) { queueIndex.value = getCurrentInfo().index; void play(previous).then(() => commitIndex(getCurrentInfo().index)).catch((error: any) => reportPlaybackError(error, '上一首暂时无法播放')) }
+  const previous = peekPrevTrack(playMode.value)
+  if (!previous) return
+  const previousIndex = getCurrentInfo().index
+  queueIndex.value = previous.index
+  void play(previous.track)
+    .then((started) => { if (started) commitIndex(previous.index) })
+    .catch((error: any) => {
+      queueIndex.value = previousIndex
+      reportPlaybackError(error, '上一首暂时无法播放')
+    })
 }
 
 function playNext() {
-  const next = getNextTrack(playMode.value)
-  if (next) { queueIndex.value = getCurrentInfo().index; void play(next).then(() => commitIndex(getCurrentInfo().index)).catch((error: any) => reportPlaybackError(error, '下一首暂时无法播放')) }
+  const next = peekNextTrack(playMode.value)
+  if (!next) return
+  const previousIndex = getCurrentInfo().index
+  queueIndex.value = next.index
+  void play(next.track)
+    .then((started) => { if (started) commitIndex(next.index) })
+    .catch((error: any) => {
+      queueIndex.value = previousIndex
+      reportPlaybackError(error, '下一首暂时无法播放')
+    })
 }
 
 function cyclePlayMode() {
@@ -1786,9 +1991,14 @@ function onAudioError(event: Event) {
 function onTrackEnded(event: Event) {
   const next = (event as CustomEvent<{ track: MusicInfo; index: number }>).detail
   if (!next?.track) return
-  commitIndex(next.index)
-  queueIndex.value = next.index
-  void play(next.track).catch((error: any) => reportPlaybackError(error, '下一首暂时无法播放'))
+  // 播放成功后再提交索引，失败时保持原曲目，避免队列索引与播放内容分叉
+  void play(next.track)
+    .then((started) => {
+      if (!started) return
+      commitIndex(next.index)
+      queueIndex.value = next.index
+    })
+    .catch((error: any) => reportPlaybackError(error, '下一首暂时无法播放'))
 }
 
 function onTrialPlayback(event: Event) {
@@ -1815,7 +2025,7 @@ function onKeydown(event: KeyboardEvent) {
     return
   }
   const target = event.target as HTMLElement
-  if (event.code === 'Space' && !['INPUT', 'TEXTAREA', 'BUTTON'].includes(target?.tagName)) {
+  if (event.code === 'Space' && !event.repeat && !['INPUT', 'TEXTAREA', 'BUTTON'].includes(target?.tagName)) {
     event.preventDefault()
     togglePlay()
   }
@@ -1852,6 +2062,7 @@ function syncTrayState() {
     artist: playerState.currentTrack?.singer || '',
     cover: playerState.coverUrl || '',
     playing: playerState.isPlaying,
+    loading: playerState.isLoading,
     hasTrack: Boolean(playerState.currentTrack),
     platform: activePlatform.value,
     vip: playerState.currentTrack?.vip || '',
@@ -1865,6 +2076,7 @@ watch(
     () => playerState.currentTrack?.songmid,
     () => playerState.coverUrl,
     () => playerState.isPlaying,
+    () => playerState.isLoading,
     activePlatform,
     currentLyricLine,
     currentIsFavorite

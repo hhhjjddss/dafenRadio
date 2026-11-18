@@ -28,6 +28,7 @@ const api = {
     artist: string
     cover: string
     playing: boolean
+    loading: boolean
     hasTrack: boolean
     platform: 'netease' | 'soda'
     vip: string
@@ -110,9 +111,11 @@ const api = {
   sodaSessionInfo: () => ipcRenderer.invoke('soda:sessionInfo') as Promise<{ success: boolean; data?: { connected: boolean; expired: boolean }; error?: string }>,
   sodaLogout: () => ipcRenderer.invoke('soda:logout'),
   sodaLibrary: () => ipcRenderer.invoke('soda:library'),
+  sodaLiked: () => ipcRenderer.invoke('soda:liked'),
+  sodaLike: (songId: string, liked: boolean) => ipcRenderer.invoke('soda:like', songId, liked),
 
   // 返回当前平台的音频地址、试听时长与实际音质，由应用内播放器播放
-  playerPlay: (songId: string, platform = 'netease', quality?: string) => ipcRenderer.invoke('player:play', songId, platform, quality),
+  playerPlay: (songId: string, platform = 'netease', quality?: string, force = false) => ipcRenderer.invoke('player:play', songId, platform, quality, force),
 
   // 从封面图片提取主色（动态色彩系统）
   themePalette: (url: string) => ipcRenderer.invoke('theme:palette', url),

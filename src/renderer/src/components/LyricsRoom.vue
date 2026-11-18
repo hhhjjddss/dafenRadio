@@ -1,6 +1,6 @@
 <template>
   <section class="lyrics-room" aria-label="沉浸歌词页">
-    <div class="lyrics-backdrop" :style="{ backgroundImage: coverUrl ? `url('${coverUrl}')` : '' }"></div>
+    <div class="lyrics-backdrop" :style="{ backgroundImage: coverSrc ? `url('${coverSrc}')` : '' }"></div>
     <header class="lyrics-top">
       <button class="lyrics-back" @click="emit('close')"><ChevronLeft :size="14" /> 返回</button>
       <div class="lyrics-top-right">
@@ -33,9 +33,14 @@
         </div>
       </div>
       <div class="lyrics-side">
-        <div class="lyrics-cover" :class="{ spinning: playing }">
-          <img v-if="coverUrl" :src="coverUrl" alt="" @error="fallbackCoverOnError" />
-          <Music2 v-else :size="34" />
+        <div class="cover-stage">
+          <div class="lyrics-cover" :class="{ spinning: playing }">
+            <img v-if="coverSrc" :src="coverSrc" alt="" @error="fallbackCoverOnError" />
+            <Music2 v-else :size="34" />
+          </div>
+          <span v-if="loading" class="cover-loading" :class="{ spinning: playing }" role="status" aria-label="正在加载">
+            <img :src="logoMark" alt="" />
+          </span>
         </div>
         <div class="lyrics-progress">
           <span class="mono">{{ formatTime(currentTime) }}</span>
@@ -96,7 +101,7 @@
                     <span class="quality-menu-line">
                       <span class="quality-menu-name">{{ option.label }}</span>
                       <em v-if="option.alias" class="quality-menu-alias mono">{{ option.alias }}</em>
-                      <i v-if="option.vip" class="quality-vip-badge mono">{{ vipBadge(option.vip) }}</i>
+                      <i v-if="option.vip" class="quality-vip-badge mono" :class="{ soda: platform === 'soda' }">{{ vipBadge(option.vip) }}</i>
                     </span>
                     <span v-if="option.hint" class="quality-menu-hint">{{ option.hint }}</span>
                   </span>
@@ -157,12 +162,14 @@ import { AudioLines, ChartNoAxesColumnIncreasing, Check, ChevronLeft, Heart, Lis
 import type { PlayMode } from '../composables/usePlayer'
 import KaraokeLine from './KaraokeLine.vue'
 import TransportIcon from './TransportIcon.vue'
-import { fallbackCoverOnError } from '../utils/cover'
+import { fallbackCoverOnError, neteaseThumb } from '../utils/cover'
+import logoMark from '../assets/logo-mark.png'
 import { NETEASE_QUALITY_OPTIONS, SODA_QUALITY_OPTIONS, qualityLabel, vipBadge } from '../utils/quality'
 
 interface KaraokeWord { time: number; duration: number; text: string }
 interface LyricLine { time: number; text: string; translation: string; words: KaraokeWord[] }
 
+const coverSrc = computed(() => neteaseThumb(props.coverUrl || '', '800y800'))
 const props = defineProps<{
   lines: LyricLine[]
   activeIndex: number
@@ -170,6 +177,7 @@ const props = defineProps<{
   artist: string
   coverUrl: string
   playing: boolean
+  loading: boolean
   favorite: boolean
   lyricBarOn: boolean
   fullscreen: boolean
@@ -367,6 +375,31 @@ onMounted(async () => {
 .lyrics-placeholder { padding-top: 20px; color: var(--text-ghost); font-size: 13px; }
 /* 行间距收紧；封面与进度条之间用 margin 拉开，形成“封面 / 控制区”两组 */
 .lyrics-side { display: grid; justify-items: center; gap: 12px; }
+.cover-stage { position: relative; display: grid; place-items: center; }
+/* 切歌等待：logo 在封面上上下跳动，替代没有反馈的空白期 */
+.cover-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-xl);
+  background: rgba(16, 12, 24, 0.46);
+  pointer-events: none;
+}
+.cover-loading.spinning { border-radius: 50%; }
+.cover-loading img {
+  width: 22%;
+  max-width: 60px;
+  object-fit: contain;
+  animation: logo-bounce 0.72s ease-in-out infinite alternate;
+}
+@keyframes logo-bounce {
+  from { transform: translateY(-5px); }
+  to { transform: translateY(5px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cover-loading img { animation: none; }
+}
 .lyrics-cover {
   width: min(24vw, 270px); aspect-ratio: 1;
   display: grid; place-items: center;
@@ -489,6 +522,15 @@ onMounted(async () => {
   font-weight: 600;
   letter-spacing: 0.04em;
   line-height: 1.3;
+}
+/* 汽水官方会员标：深绿胶囊 + 荧光绿斜体字，尺寸与网易云标签对齐 */
+.quality-vip-badge.soda {
+  padding: 1px 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #02803f, #187f4c 58%, #3d9e6f);
+  color: #51f53c;
+  font-weight: 700;
+   
 }
 .quality-pop-enter-active, .quality-pop-leave-active { transition: opacity 0.16s ease, transform 0.16s ease; }
 .quality-pop-enter-from, .quality-pop-leave-to { opacity: 0; transform: translateY(6px); }

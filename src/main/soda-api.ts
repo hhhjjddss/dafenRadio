@@ -1,20 +1,16 @@
-/* 汽水音乐（Soda）数据层。
-   逆向细节参考开源项目 guowenye/qishui-api（MIT），这里只保留浏览、登录、试听与歌词所需的最小集合。 */
+/* 汽水音乐（Soda）协议层。
+   歌单详情走 App 接口（与手机客户端条目一致）；登录、资料、歌单、红心走 PC 客户端接口
+   （抖音 App 扫码拿 sessionid，和手机同一套账号体系）；公开推荐/搜索/试听/H5 也在这里。
+   音源仍在车机协议（qishui-api）。 */
 
 import { app, safeStorage, webContents } from 'electron'
 import { is } from '@electron-toolkit/utils'
+import { createHash } from 'crypto'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, statSync } from 'fs'
 import { join } from 'path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync } from 'fs'
-import { createHash, randomBytes, randomUUID } from 'crypto'
 import {
-  ackSecondVerify,
-  closeSignerSession,
-  getSecondVerifyDecision,
-  isSecondVerifyDone,
-  openSignerVerifyWindow,
-  registerSecondVerify,
-  signerCookies,
-  signerRequest
+  signerRequest, signerCookies, closeSignerSession, openSignerVerifyWindow,
+  registerSecondVerify, isSecondVerifyDone, ackSecondVerify, getSecondVerifyDecision
 } from './soda-signer'
 
 const LUNA_API = 'https://beta-luna.douyin.com'
@@ -34,23 +30,184 @@ const PC_APP_HEADERS = {
 }
 const WEB_HEADERS = { 'User-Agent': WEB_UA }
 
-// 统一账号登录（汽水与主账号共用凭据）
+// PC 扫码登录固定参数（账号接口仍沿用这套 aid/iid）
 const PASSPORT = {
   aid: '386088',
   iid: '27960026095955',
   version_code: '30020100',
-  passport_jssdk_version: '2.4.13',
-  passport_jssdk_type: 'normal',
-  is_from_ttaccountsdk: '1',
-  next: 'https://api.qishui.com'
+  passport_ssdk_version: '2.4.13',
+  passport_ssdk_type: 'normal',
+  is_from_taccountsdk: '1',
+  next: 'https://api.qishui.com',
+  need_logo: 'false',
+  need_short_url: 'false',
+  is_frontend: 'true',
+  is_new_login: '1'
+}
+
+// 汽水确认后的登录态由多个 cookie 组成（sessionid_ss / sid_guard / session_tlb_tag…），
+// 只存 sessionid 会拿到空值；这里保存整份 cookie 头，加密落盘，绝不回传渲染进程之外的组件。
+let sodaCookie = ''
+let sodaSessionLoaded = false
+
+const SESSION_FILE = 'soda-session.bin'
+const SESSION_MARKER = 'soda-session.logged-out'
+// 历史版本用过 soda-pc-session.*，读取时要兼容，否则老用户每次启动都像没登录
+const LEGACY_SESSION_FILE = 'soda-pc-session.bin'
+const LEGACY_SESSION_MARKER = 'soda-pc-session.logged-out'
+
+function sodaDataDir() {
+  return join(app.getPath('userData'), 'data')
+}
+
+// 挑一个真正可写的目录存凭据；Windows 某些安全策略会拒绝写 userData/data
+let sodaStorageRoot = ''
+function resolveSodaStorageRoot() {
+  if (sodaStorageRoot) return sodaStorageRoot
+  const candidates = [sodaDataDir()]
+  if (is.dev) candidates.push(app.getAppPath())
+  for (const dir of candidates) {
+    try {
+      mkdirSync(dir, { recursive: true })
+      const probe = join(dir, '.soda-write-test')
+      writeFileSync(probe, '')
+      try { unlinkSync(probe) } catch { /* 探测文件删不掉也不影响写入 */ }
+      sodaStorageRoot = dir
+      return dir
+    } catch (error) {
+      console.warn('[汽水] 数据目录不可写，尝试下一个', dir, error)
+    }
+  }
+  return sodaDataDir()
+}
+
+// 凭据可能落在多个目录：可写目录、userData、开发期项目目录。任一处有有效凭据都能恢复登录，
+// 避免目录变化、迁移、版本升级后被误判为未登录而每次都要扫码。
+function sodaSessionRoots(): string[] {
+  const roots = new Set<string>([resolveSodaStorageRoot(), sodaDataDir(), app.getPath('userData')])
+  if (is.dev) roots.add(app.getAppPath())
+  return [...roots]
+}
+
+function sessionNameVariants(name: 'session' | 'marker'): string[] {
+  if (name === 'session') return [SESSION_FILE, LEGACY_SESSION_FILE]
+  return [SESSION_MARKER, LEGACY_SESSION_MARKER]
+}
+
+function sodaSessionFiles(): string[] {
+  const files: string[] = []
+  for (const root of sodaSessionRoots()) {
+    for (const name of sessionNameVariants('session')) files.push(join(root, name))
+  }
+  return files
+}
+
+function sodaLogoutMarkers(): string[] {
+  const files: string[] = []
+  for (const root of sodaSessionRoots()) {
+    for (const name of sessionNameVariants('marker')) files.push(join(root, name))
+  }
+  return files
+}
+
+function newestLogoutMarker(): number {
+  let newest = 0
+  for (const marker of sodaLogoutMarkers()) {
+    try {
+      if (existsSync(marker)) newest = Math.max(newest, statSync(marker).mtimeMs)
+    } catch { /* 标记读不到就当作没有 */ }
+  }
+  return newest
+}
+
+function clearLogoutMarkers() {
+  for (const marker of sodaLogoutMarkers()) {
+    try { if (existsSync(marker)) unlinkSync(marker) } catch (error) { console.warn('[汽水] 清除退出标记失败', marker, error) }
+  }
+}
+
+function loadSodaSession() {
+  if (sodaSessionLoaded) return
+  sodaSessionLoaded = true
+  if (!safeStorage.isEncryptionAvailable()) return
+  // 只忽略退出标记之前保存的凭据：标记删不掉时，之后重新登录的凭据仍然有效。
+  // 多目录都有文件时取最新的那份，避免读到已退出的旧账号。
+  const loggedOutAt = newestLogoutMarker()
+  const candidates: Array<{ file: string; mtime: number }> = []
+  for (const file of sodaSessionFiles()) {
+    try {
+      const mtime = statSync(file).mtimeMs
+      if (!loggedOutAt || mtime > loggedOutAt) candidates.push({ file, mtime })
+    } catch { /* 文件不存在或不可读，跳过 */ }
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime)
+  for (const { file } of candidates) {
+    try {
+      const raw = safeStorage.decryptString(readFileSync(file))
+      if (!raw) continue
+      let value = raw
+      try {
+        // 兼容旧版只存 {"sessionid":"..."} 的文件
+        const json = JSON.parse(raw)
+        if (json && typeof json === 'object' && typeof json.sessionid === 'string' && json.sessionid) value = json.sessionid
+      } catch { /* 不是 JSON，按整份 cookie 字符串处理 */ }
+      if (value) { sodaCookie = value.includes('=') ? value : `sessionid=${value}`; return }
+    } catch (error) {
+      console.warn('[汽水] 读取登录态失败', file, error)
+    }
+  }
+}
+
+function saveSodaSession(cookie: string) {
+  const normalized = cookie.trim().replace(/;+$/, '')
+  if (!normalized) throw new Error('没有拿到汽水登录凭据')
+  sodaCookie = normalized
+  sodaSessionLoaded = true
+  try {
+    if (!safeStorage.isEncryptionAvailable()) {
+      console.warn('[汽水] 安全存储不可用，PC 登录只在本次运行内有效')
+      return
+    }
+    // 写到所有候选目录（标准文件名），任一处成功即可恢复；同时清掉退出标记。
+    // 这样即使某个目录被安全软件拦截或启动目录变化，也不会丢登录态。
+    const encrypted = safeStorage.encryptString(normalized)
+    let saved = false
+    for (const root of sodaSessionRoots()) {
+      try { writeFileSync(join(root, SESSION_FILE), encrypted); saved = true } catch { /* 换下一个目录 */ }
+    }
+    if (!saved) console.warn('[汽水] 所有目录都不可写，登录只在本次运行内有效')
+    clearLogoutMarkers()
+    recommendCache = null
+  } catch (error) {
+    console.warn('[汽水] PC 登录凭据无法保存，本次运行内有效', error)
+  }
+}
+
+function clearPcSession() {
+  sodaCookie = ''
+  sodaSessionLoaded = true
+  for (const file of sodaSessionFiles()) {
+    try { if (existsSync(file)) unlinkSync(file) } catch (error) { console.warn('[汽水] 删除登录凭据失败（已忽略）', file, error) }
+  }
+  const stamp = new Date().toISOString()
+  for (const marker of sodaLogoutMarkers()) {
+    try { writeFileSync(marker, stamp, 'utf8') } catch { /* 目录不可写时内存退出即可 */ }
+  }
+}
+
+function requireSodaSession() {
+  loadSodaSession()
+  if (!sodaCookie) throw new Error('请先登录汽水音乐')
+  return sodaCookie.endsWith(';') ? sodaCookie : `${sodaCookie};`
 }
 
 const randomDigits = (length: number) => Array.from({ length: length }, () => Math.floor(Math.random() * 10)).join('')
-const randomHex = (length: number) => randomBytes(Math.ceil(length / 2)).toString('hex').slice(0, length)
-// 参考实现：88 字节 base64url（118 字符）+ `==`
-const randomMsToken = () => `${randomBytes(88).toString('base64url')}==`
+const MS_TOKEN_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+// libresoda 实测 msToken = 88 字节 base64url + '=='，共 120 字符
+const randomMsToken = () => Array.from({ length: 118 }, () => MS_TOKEN_CHARS[Math.floor(Math.random() * MS_TOKEN_CHARS.length)]).join('') + '=='
+const randomHex = (length: number) => Array.from({ length: length }, () => Math.floor(Math.random() * 16).toString(16)).join('')
 const deviceId = randomDigits(16)
-const installId = randomDigits(16)
+const installId = randomDigits(15)
 
 interface RequestOptions {
   method?: string
@@ -87,7 +244,7 @@ async function request(path: string, options: RequestOptions = {}): Promise<Requ
     if (options.redirect === 'manual' && response.status >= 300 && response.status < 400) {
       return { body: null, headers: response.headers, status: response.status, text }
     }
-    if (response.status === 401 || response.status === 403) throw new Error('汽水登录已失效，请重新登录')
+    // 公开接口（推荐/搜索/歌单）被风控拒绝时也会返回 401/403，不能据此判定账号登录失效
     if (!response.ok) throw new Error(`汽水接口请求失败（HTTP ${response.status}）`)
     let body: any = null
     try { body = text ? JSON.parse(text) : null } catch { body = null }
@@ -114,184 +271,60 @@ async function requestJson(path: string, options: RequestOptions = {}) {
   return (await request(path, options)).body
 }
 
-/* ============ 登录态（完整 cookie 只落盘加密，绝不回传渲染进程） ============ */
-let sodaStorageRoot = ''
-// 汽水确认后的登录态由多个 cookie 组成（sessionid_ss / sid_guard / session_tlb_tag…），
-// 只存 sessionid 会拿到空值；这里保存整份 cookie 头，兼容旧版只存 sessionid 的文件。
-let sodaCookie = ''
-let sodaSessionLoaded = false
-
-// 与网易云一致：登录态统一放在 userData/data，
-// 某些 Windows 安全策略拒绝写入时开发环境回退到项目目录
-function sodaDataDir() {
-  return join(app.getPath('userData'), 'data')
+// passport 接口要看 Set-Cookie、也不按 bizCode 抛错，用独立请求层
+async function passportRequest(path: string, options: RequestOptions = {}): Promise<RequestResult> {
+  const url = new URL(`${PC_API}${path}`)
+  for (const [key, value] of Object.entries(options.query || {})) url.searchParams.set(key, String(value))
+  const response = await fetch(url, {
+    method: options.method || 'GET',
+    headers: { Accept: 'application/json, text/plain, */*', ...(options.headers || {}) },
+    body: options.body === undefined ? undefined : typeof options.body === 'string' ? options.body : JSON.stringify(options.body),
+    signal: AbortSignal.timeout(15000)
+  })
+  const text = await response.text()
+  let body: any = null
+  try { body = text ? JSON.parse(text) : null } catch { body = null }
+  if (!response.ok) throw new Error(`汽水登录请求失败（HTTP ${response.status}）`)
+  return { body, headers: response.headers, status: response.status, text }
 }
 
-function resolveSodaStorageRoot() {
-  if (sodaStorageRoot) return sodaStorageRoot
-  const candidates = [sodaDataDir()]
-  if (is.dev) candidates.push(app.getAppPath())
-  for (const dir of candidates) {
-    try {
-      mkdirSync(dir, { recursive: true })
-      const probe = join(dir, '.soda-write-test')
-      writeFileSync(probe, '')
-      try { unlinkSync(probe) } catch { /* 探测文件删不掉也不影响写入 */ }
-      sodaStorageRoot = dir
-      return dir
-    } catch (error) {
-      console.warn('[汽水] 数据目录不可写，尝试下一个', dir, error)
+// 合并 Set-Cookie / payload 里的 cookie 片段到会话 cookie jar（同名覆盖，过滤 Cookie 属性）
+function mergeCookies(current: string, values: string[]): string {
+  const jar = new Map<string, string>()
+  for (const raw of [current, ...values]) {
+    for (const part of String(raw || '').split(';')) {
+      const eq = part.indexOf('=')
+      if (eq <= 0) continue
+      const name = part.slice(0, eq).trim()
+      if (/^(path|domain|expires|max-age|samesite|secure|httponly)$/i.test(name)) continue
+      const value = part.slice(eq + 1).trim()
+      if (name && value) jar.set(name, value)
     }
   }
-  throw new Error('无法创建汽水数据目录，请检查安全软件的文件夹保护设置')
+  return Array.from(jar, ([k, v]) => `${k}=${v}`).join('; ')
 }
 
-function sodaSessionFile() {
-  return join(resolveSodaStorageRoot(), 'soda-session.bin')
+// 登录态以 cookie 里是否存在这些键为准（实测 sessionid 常随 redirect 下发，不在响应头）
+function hasLoginState(cookie: string): boolean {
+  return cookie.split(';').some(part => {
+    const eq = part.indexOf('=')
+    if (eq <= 0) return false
+    const name = part.slice(0, eq).trim().toLowerCase()
+    return ['sessionid', 'sessionid_ss', 'sid_guard', 'sid_tt'].includes(name) && part.slice(eq + 1).trim() !== ''
+  })
 }
 
-// 凭据可能落在多个目录：当前可写目录、userData、开发期项目目录（旧版位置）。
-// 只要其中一处有有效凭据就能恢复登录，避免可写目录变化后像是被退出登录。
-function sodaSessionRoots(): string[] {
-  const roots = new Set<string>()
-  try { roots.add(resolveSodaStorageRoot()) } catch { /* 可写目录不可用时仍检查旧位置 */ }
-  roots.add(sodaDataDir())
-  if (is.dev) roots.add(app.getAppPath())
-  roots.add(app.getPath('userData'))
-  return [...roots]
-}
-
-function sodaSessionFiles(): string[] {
-  return sodaSessionRoots().map((dir) => join(dir, 'soda-session.bin'))
-}
-
-// 旧凭据可能删不掉；退出标记写进所有目录，下次启动读到任意一处就忽略残留
-function sodaLogoutMarkers(): string[] {
-  return sodaSessionRoots().map((dir) => join(dir, 'soda-session.logged-out'))
-}
-
-function newestSodaLogoutMarker() {
-  let newest = 0
-  for (const marker of sodaLogoutMarkers()) {
-    try {
-      if (existsSync(marker)) newest = Math.max(newest, statSync(marker).mtimeMs)
-    } catch { /* 标记读不到就当作没有 */ }
-  }
-  return newest
-}
-
-function clearSodaLogoutMarkers() {
-  for (const marker of sodaLogoutMarkers()) {
-    try { if (existsSync(marker)) unlinkSync(marker) } catch (error) { console.warn('[汽水] 清除退出标记失败', marker, error) }
-  }
-}
-
-function loadSodaSession() {
-  if (sodaSessionLoaded) return
-  sodaSessionLoaded = true
-  if (!safeStorage.isEncryptionAvailable()) return
-  // 只忽略退出之前保存的凭据：标记删不掉（EPERM）时，之后重新登录的凭据仍然有效。
-  // 多目录都有文件时取最新的那份，避免切到旧目录时把已经退出的账号又读回来。
-  const loggedOutAt = newestSodaLogoutMarker()
-  const candidates: Array<{ file: string; mtime: number }> = []
-  for (const file of sodaSessionFiles()) {
-    try {
-      const mtime = statSync(file).mtimeMs
-      if (!loggedOutAt || mtime > loggedOutAt) candidates.push({ file, mtime })
-    } catch { /* 文件不存在或不可读，跳过 */ }
-  }
-  candidates.sort((a, b) => b.mtime - a.mtime)
-  for (const { file } of candidates) {
-    try {
-      const value = safeStorage.decryptString(readFileSync(file))
-      if (value) {
-        sodaCookie = value.includes('=') ? value : `sessionid=${value}`
-        return
-      }
-    } catch (error) {
-      console.warn('[汽水] 读取登录状态失败', error)
-    }
-  }
-}
-
-function saveSodaSession(cookie: string) {
-  const normalized = cookie.trim().replace(/;+$/, '')
-  if (!normalized) throw new Error('没有拿到汽水登录凭据')
-  if (!safeStorage.isEncryptionAvailable()) {
-    sodaCookie = normalized
-    sodaSessionLoaded = true
-    console.warn('[汽水] 安全存储不可用，登录只在本次运行内有效')
-    return
-  }
-  try {
-    writeFileSync(sodaSessionFile(), safeStorage.encryptString(normalized))
-    sodaCookie = normalized
-    sodaSessionLoaded = true
-    clearSodaLogoutMarkers()
-    recommendCache = null
-  } catch (error: any) {
-    sodaCookie = ''
-    sodaSessionLoaded = true
-    throw new Error(`汽水登录凭据无法保存：${error?.message || error}`)
-  }
-}
-
-function requireSodaSession() {
-  loadSodaSession()
-  if (!sodaCookie) throw new Error('请先登录汽水音乐')
-  return sodaCookie.endsWith(';') ? sodaCookie : `${sodaCookie};`
-}
-
-function withSession(headers: Record<string, string>) {
-  loadSodaSession()
-  return sodaCookie ? { ...headers, Cookie: sodaCookie } : headers
-}
-
-export function hasSodaSession() {
-  loadSodaSession()
-  return Boolean(sodaCookie)
-}
-
-// 校验真实登录态：凭据过期时让界面明确提示重新登录，而不是把空资料当成缓存问题。
-// 网络异常时保守保留登录态，避免一次断网就把账号踢掉。
-export async function getSodaSessionInfo(): Promise<{ connected: boolean; expired: boolean }> {
-  loadSodaSession()
-  if (!sodaCookie) return { connected: false, expired: false }
-  try {
-    await requestJson(`${PC_API}/luna/pc/me`, {
-      headers: { ...PC_HEADERS, Cookie: requireSodaSession() },
-      query: { aid: PASSPORT.aid }
-    })
-    return { connected: true, expired: false }
-  } catch (error: any) {
-    if (String(error?.message || '').includes('登录已失效')) return { connected: false, expired: true }
-    console.warn('[汽水] 登录状态校验失败，保留已保存的登录态:', error?.message || error)
-    return { connected: true, expired: false }
-  }
-}
-
-/* ============ 扫码登录：轮询放主进程，浮层关掉也不丢确认 ============ */
-export type SodaLoginPhase = 'idle' | 'waiting' | 'scanned' | 'success' | 'expired' | 'error'
-
-export interface SodaLoginState {
+type SodaLoginPhase = 'idle' | 'waiting' | 'scanned' | 'success' | 'expired' | 'error'
+interface SodaLoginState {
   phase: SodaLoginPhase
   qrImage: string
   message: string
   error: string
   updatedAt: number
 }
-
-let sodaLoginState: SodaLoginState = { phase: 'idle', qrImage: '', message: '', error: '', updatedAt: 0 }
-let sodaLoginSeq = 0
-let sodaLoginPollTimer: ReturnType<typeof setTimeout> | null = null
-let sodaLoginFailures = 0
-let sodaLoginLastSignal = ''
-const SODA_POLL_INTERVAL = 3000
-// 参考实现：error_code=7 只是临时限流，冷却 5 秒继续轮询。写成 60 秒会把
-// 「扫码后确认」的窗口整段跳过，表现为一直卡在 scanned。
-const SODA_RATE_LIMIT_COOLDOWN = 5000
-const SODA_LOGIN_COOKIES = ['sessionid', 'sessionid_ss', 'sid_guard', 'sid_tt']
-
+// libresoda 真机实测：同一 token 最小轮询间隔 2.5s，error_code=7 限流冷却 5s
+const PC_POLL_INTERVAL = 2500
+const PC_COOLDOWN_MS = 5000
 interface SodaQrSession {
   key: string
   token: string
@@ -301,10 +334,17 @@ interface SodaQrSession {
   verifyPortraitId: string
   expireAt: number
   cooldownUntil: number
-  verifyAttempts?: number
+  verifyAttempts: number
 }
 
+let sodaLoginState: SodaLoginState = { phase: 'idle', qrImage: '', message: '', error: '', updatedAt: 0 }
+let sodaLoginSeq = 0
+let sodaPollTimer: ReturnType<typeof setTimeout> | null = null
+let sodaLoginFailures = 0
+let sodaLoginLastSignal = ''
 let sodaQrSession: SodaQrSession | null = null
+
+export function getSodaLoginState(): SodaLoginState { return { ...sodaLoginState } }
 
 function publishSodaLoginState(patch: Partial<SodaLoginState>) {
   sodaLoginState = { ...sodaLoginState, ...patch, updatedAt: Date.now() }
@@ -313,19 +353,14 @@ function publishSodaLoginState(patch: Partial<SodaLoginState>) {
   }
 }
 
-export function getSodaLoginState(): SodaLoginState {
-  return { ...sodaLoginState }
-}
-
 function stopSodaLoginPoll() {
-  if (sodaLoginPollTimer) clearTimeout(sodaLoginPollTimer)
-  sodaLoginPollTimer = null
+  if (sodaPollTimer) { clearTimeout(sodaPollTimer); sodaPollTimer = null }
 }
 
-function scheduleSodaLoginPoll(seq: number, delay = SODA_POLL_INTERVAL) {
+function scheduleSodaLoginPoll(seq: number, delay = PC_POLL_INTERVAL) {
   stopSodaLoginPoll()
   if (!sodaQrSession?.token || seq !== sodaLoginSeq) return
-  sodaLoginPollTimer = setTimeout(() => { void pollSodaLogin(seq) }, delay)
+  sodaPollTimer = setTimeout(() => { void pollSodaLogin(seq) }, delay)
 }
 
 function failSodaLogin(phase: SodaLoginPhase, message: string) {
@@ -337,53 +372,6 @@ function failSodaLogin(phase: SodaLoginPhase, message: string) {
   publishSodaLoginState({ phase, qrImage: '', message: '', error: message })
 }
 
-// 二次验证组件需要的公共参数快照（对象形态，对齐参考实现的 commonParams）。
-function sodaGeneralParamsObject(session: SodaQrSession): Record<string, string> {
-  const params = sodaCommonParams(session, randomHex(8))
-  const obj: Record<string, string> = {}
-  params.forEach((value, key) => { obj[key] = value })
-  return obj
-}
-
-// 归一化 2046 决策里的 biz_params：JSON 字符串 / k=v 查询串 / 对象都归成键值对列表，
-// 嵌套对象序列化成 JSON 文本，null 丢弃（对齐参考实现的 normalizeBizParams）。
-function normalizeBizParams(value: any): Array<[string, string]> {
-  if (value === null || value === undefined) return []
-  if (typeof value === 'string') {
-    const text = value.trim()
-    if (!text) return []
-    try {
-      const parsed = JSON.parse(text)
-      return normalizeBizParams(parsed)
-    } catch {
-      // 退路：按查询串解析
-    }
-    return text.split('&').map(pair => {
-      const eq = pair.indexOf('=')
-      if (eq <= 0) return null
-      let key = pair.slice(0, eq)
-      let val = pair.slice(eq + 1)
-      try { key = decodeURIComponent(key) } catch { /* 保持原样 */ }
-      try { val = decodeURIComponent(val) } catch { /* 保持原样 */ }
-      return [key, val] as [string, string]
-    }).filter((x): x is [string, string] => !!x && !!x[0])
-  }
-  if (typeof value === 'object' && !Array.isArray(value)) {
-    return Object.entries(value)
-      .filter(([, v]) => v !== null && v !== undefined)
-      .map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)] as [string, string])
-  }
-  return []
-}
-
-// 打开二次验证窗口：登记决策后加载 security_host.html（官方组件经 /verify/* 桥接）。
-function openSodaVerifyWindow(key: string, seq: number) {
-  void openSignerVerifyWindow(key, () => {
-    sodaLoginFailures = 0
-    scheduleSodaLoginPoll(seq)
-  })
-}
-
 function createQrSession(): SodaQrSession {
   return {
     // 每个二维码一个独立浏览器分区与设备身份，避免设备身份复用被护照服务限流
@@ -392,9 +380,10 @@ function createQrSession(): SodaQrSession {
     deviceId: randomDigits(16),
     installId: randomDigits(15),
     msToken: randomMsToken(),
-    verifyPortraitId: `${randomUUID()}.login`,
+    verifyPortraitId: `${randomHex(8)}-${randomHex(4)}-${randomHex(4)}-${randomHex(4)}-${randomHex(12)}.login`,
     expireAt: 0,
-    cooldownUntil: 0
+    cooldownUntil: 0,
+    verifyAttempts: 0
   }
 }
 
@@ -426,7 +415,52 @@ function sodaCommonParams(session: SodaQrSession, bizTraceId: string) {
   })
 }
 
-async function passportRequest(
+// 二次验证组件需要的公共参数快照（对象形态，对齐参考实现的 commonParams）
+function sodaGeneralParamsObject(session: SodaQrSession): Record<string, string> {
+  const params = sodaCommonParams(session, randomHex(8))
+  const obj: Record<string, string> = {}
+  params.forEach((value, key) => { obj[key] = value })
+  return obj
+}
+
+// 归一化 2046 决策里的 biz_params：JSON 字符串 / k=v 查询串 / 对象都归成键值对列表，
+// 嵌套对象序列化成 JSON 文本，null 丢弃
+function normalizeBizParams(value: any): Array<[string, string]> {
+  if (value === null || value === undefined) return []
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (!text) return []
+    try {
+      return normalizeBizParams(JSON.parse(text))
+    } catch { /* 退回按查询串解析 */ }
+    return text.split('&').map(pair => {
+      const eq = pair.indexOf('=')
+      if (eq <= 0) return null
+      let key = pair.slice(0, eq)
+      let val = pair.slice(eq + 1)
+      try { key = decodeURIComponent(key) } catch { /* 保持原样 */ }
+      try { val = decodeURIComponent(val) } catch { /* 保持原样 */ }
+      return [key, val] as [string, string]
+    }).filter((x): x is [string, string] => !!x && !!x[0])
+  }
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return Object.entries(value)
+      .filter(([, v]) => v !== null && v !== undefined)
+      .map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)] as [string, string])
+  }
+  return []
+}
+
+// 打开二次验证窗口：登记决策后加载 security_host.html（官方组件经 /verify/* 桥接）
+function openSodaVerifyWindow(key: string, seq: number) {
+  void openSignerVerifyWindow(key, () => {
+    sodaLoginFailures = 0
+    scheduleSodaLoginPoll(seq)
+  })
+}
+
+// 签名页代发护照请求：a_bogus / msToken / 会话 cookie 都由隐藏浏览器上下文补齐
+async function signerPassportRequest(
   session: SodaQrSession,
   method: 'GET' | 'POST',
   path: string,
@@ -456,24 +490,6 @@ async function passportRequest(
   return { response, envelope }
 }
 
-function hasLoginCookie(cookie: string) {
-  const names = new Set(cookie.split(';').map(part => part.trim().split('=')[0]).filter(Boolean))
-  return SODA_LOGIN_COOKIES.some(name => names.has(name))
-}
-
-function mergeCookies(current: string, extra: string[]) {
-  const jar = new Map<string, string>()
-  for (const raw of [current, ...extra]) {
-    for (const part of String(raw || '').split(';')) {
-      const pair = part.trim()
-      const eq = pair.indexOf('=')
-      if (eq <= 0) continue
-      jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1))
-    }
-  }
-  return [...jar.entries()].map(([name, value]) => `${name}=${value}`).join('; ')
-}
-
 function finishSodaLogin(cookie: string, key: string) {
   try {
     saveSodaSession(cookie)
@@ -489,7 +505,7 @@ function finishSodaLogin(cookie: string, key: string) {
 }
 
 async function pollSodaLogin(seq: number) {
-  sodaLoginPollTimer = null
+  sodaPollTimer = null
   const session = sodaQrSession
   if (!session?.token || seq !== sodaLoginSeq) return
   const now = Date.now()
@@ -522,12 +538,12 @@ async function checkSodaLogin(seq: number, session: SodaQrSession, resend: boole
     }
     if (resend) {
       const decision = getSecondVerifyDecision(session.key) || {}
-      for (const [key, value] of normalizeBizParams(decision.biz_params)) {
+      for (const [key, value] of normalizeBizParams((decision as any).biz_params)) {
         if (!(key in bodyParams)) bodyParams[key] = value
       }
     }
     const body = new URLSearchParams(bodyParams).toString()
-    const { response, envelope } = await passportRequest(
+    const { response, envelope } = await signerPassportRequest(
       session,
       'POST',
       '/passport/web/check_qrconnect/',
@@ -572,13 +588,13 @@ async function checkSodaLogin(seq: number, session: SodaQrSession, resend: boole
     }
     // 7 号是临时限流（官方文案「访问太频繁」）：冷却 5 秒继续，绝不判失败
     if (!confirmed && (errorCode === 7 || /访问太频繁|操作频繁/.test(message))) {
-      session.cooldownUntil = Date.now() + SODA_RATE_LIMIT_COOLDOWN
+      session.cooldownUntil = Date.now() + PC_COOLDOWN_MS
       const phase = sodaLoginState.phase === 'scanned' ? 'scanned' : 'waiting'
       publishSodaLoginState({
         phase,
         message: phase === 'scanned' ? '已扫码，正在确认登录…' : '等待手机扫码…'
       })
-      scheduleSodaLoginPoll(seq, SODA_RATE_LIMIT_COOLDOWN)
+      scheduleSodaLoginPoll(seq, PC_COOLDOWN_MS)
       return
     }
     if (!confirmed && errorCode !== 0) {
@@ -590,7 +606,7 @@ async function checkSodaLogin(seq: number, session: SodaQrSession, resend: boole
     if (confirmed) {
       let cookie = await signerCookies(session.key)
       const redirectUrl = String(data.redirect_url || data.redirectUrl || data.redirect || '').trim()
-      if (!hasLoginCookie(cookie) && redirectUrl) {
+      if (!hasLoginState(cookie) && redirectUrl) {
         try {
           await signerRequest(session.key, {
             method: 'GET',
@@ -608,14 +624,14 @@ async function checkSodaLogin(seq: number, session: SodaQrSession, resend: boole
       const parts: string[] = []
       for (const key of ['session_cookie', 'cookie']) {
         if (typeof data[key] === 'string') parts.push(data[key])
-        if (typeof envelope[key] === 'string') parts.push(envelope[key])
+        if (typeof (envelope as any)[key] === 'string') parts.push((envelope as any)[key])
       }
       for (const key of ['sessionid', 'session_id']) {
         if (typeof data[key] === 'string') parts.push(`sessionid=${data[key]}`)
         if (typeof data.auth?.[key] === 'string') parts.push(`sessionid=${data.auth[key]}`)
       }
       cookie = mergeCookies(cookie, parts)
-      if (!hasLoginCookie(cookie)) {
+      if (!hasLoginState(cookie)) {
         failSodaLogin('error', '手机已确认，但登录凭据没有返回，请重新获取二维码再试')
         return
       }
@@ -649,21 +665,22 @@ async function checkSodaLogin(seq: number, session: SodaQrSession, resend: boole
     sodaLoginFailures++
     console.warn('[汽水] 查询扫码状态失败', String(error?.message || error))
     if (sodaLoginFailures >= 5) {
-      failSodaLogin('error', String(error?.message || '') || '登录状态查询失败，请刷新二维码')
+      failSodaLogin('error', String(error?.message || '') || '登录状态查询失败，请刷新二维码重试')
       return
     }
-    scheduleSodaLoginPoll(seq, Math.min(SODA_POLL_INTERVAL * sodaLoginFailures, 10_000))
+    scheduleSodaLoginPoll(seq, Math.min(PC_POLL_INTERVAL * sodaLoginFailures, 10_000))
   }
 }
 
-// 取一次二维码；遇到 2046 风控时在验证窗口闭环后用同一会话重试（递归，次数受 verifyAttempts 限制）
+// 获取二维码：走签名页代理（get_qrcode 必需 a_bogus / msToken 签名，裸请求拿不到 token）。
+// 遇到 2046 风控时在验证窗口闭环后用同一会话重试（递归，次数受 verifyAttempts 限制）。
 async function fetchQrcode(seq: number, session: SodaQrSession): Promise<{ token: string; qrImage: string; expireAt: number }> {
-  const { response, envelope } = await passportRequest(session, 'GET', '/passport/web/get_qrcode/', {
-    next: PC_API,
-    need_logo: 'false',
-    need_short_url: 'false',
-    is_new_login: '1'
-  })
+  const { response, envelope } = await signerPassportRequest(
+    session,
+    'GET',
+    '/passport/web/get_qrcode/',
+    { next: PC_API, need_logo: 'false', need_short_url: 'false', is_new_login: '1' }
+  )
   if (seq !== sodaLoginSeq) throw new Error('登录二维码已刷新，请使用最新的二维码')
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`汽水接口请求失败（HTTP ${response.status}）`)
@@ -720,45 +737,146 @@ export async function beginSodaLogin() {
     if (seq !== sodaLoginSeq) throw new Error('登录二维码已刷新，请使用最新的二维码')
     session.token = result.token
     session.expireAt = result.expireAt
-    publishSodaLoginState({ phase: 'waiting', qrImage: result.qrImage, message: '等待手机扫码…', error: '' })
+    publishSodaLoginState({ phase: 'waiting', qrImage: result.qrImage, message: '请使用汽水音乐App 扫码授权汽水音乐', error: '' })
     scheduleSodaLoginPoll(seq)
     return { qrImage: result.qrImage, expireAt: session.expireAt }
   } catch (error: any) {
     const errorText = String(error?.message || '') || '获取二维码失败'
-    console.warn('[汽水] 获取二维码失败:', errorText)
+    console.warn('[汽水] 获取二维码失败', errorText)
     if (seq === sodaLoginSeq) failSodaLogin('error', errorText)
     throw new Error(errorText)
   }
 }
 
-export function logoutSoda() {
+export async function refreshSodaSessionInfo(): Promise<{ connected: boolean; expired: boolean }> {
   loadSodaSession()
+  if (!sodaCookie) return { connected: false, expired: false }
+  try {
+    await pcAccountGet('/luna/pc/me')
+    return { connected: true, expired: false }
+  } catch (error: any) {
+    const message = String(error?.message || '')
+    if (message.includes('登录已失效')) return { connected: false, expired: true }
+    // 网络错误保留登录态
+    return { connected: true, expired: false }
+  }
+}
+
+export function hasSodaSession() {
+  loadSodaSession()
+  return Boolean(sodaCookie)
+}
+export function logoutSoda() {
   sodaLoginSeq++
   stopSodaLoginPoll()
   const session = sodaQrSession
   sodaQrSession = null
-  if (session) closeSignerSession(session.key)
   sodaLoginFailures = 0
   sodaLoginLastSignal = ''
-  sodaCookie = ''
-  sodaSessionLoaded = true
-  recommendCache = null
+  if (session) closeSignerSession(session.key)
+  clearPcSession()
   publishSodaLoginState({ phase: 'idle', qrImage: '', message: '', error: '' })
-  const files = sodaSessionFiles()
-  for (const file of files) {
-    try {
-      if (existsSync(file)) unlinkSync(file)
-    } catch (error) {
-      console.warn('[汽水] 删除登录凭据失败（已忽略）:', file, error)
-    }
+}
+
+// PC 账号接口统一走整份登录 cookie（含 sessionid / sessionid_ss / sid_guard 等）
+async function pcAccountGet(path: string, extra: Record<string, string | number> = {}) {
+  const body = await passportRequest(path, {
+    headers: { ...PC_HEADERS, Cookie: requireSodaSession() },
+    query: { aid: PASSPORT.aid, ...extra }
+  })
+  const code = Number(body.body?.status_code ?? body.body?.code ?? 0)
+  if (code !== 0) {
+    const msg = String(body.body?.status_info?.status_msg || body.body?.message || '')
+    if (/登录.*(失效|过期|重新登录)|未登录|请先登录/.test(msg)) throw new Error('汽水登录已失效，请重新登录')
+    throw new Error(msg || `汽水账号接口异常（${code}）`)
   }
-  for (const marker of sodaLogoutMarkers()) {
-    try {
-      writeFileSync(marker, new Date().toISOString(), 'utf8')
-    } catch (error) {
-      console.warn('[汽水] 写入退出标记失败:', marker, error)
-    }
+  return body.body
+}
+
+// PC 账号写入接口：与读取共用整份登录 cookie，只额外带一个 JSON body。
+// 收藏 / 取消收藏的路径与请求体对齐汽水 PC 客户端（libresoda collection.rs）。
+async function pcAccountPost(path: string, body: Record<string, unknown>, extra: Record<string, string | number> = {}) {
+  const result = await passportRequest(path, {
+    method: 'POST',
+    headers: { ...PC_HEADERS, Cookie: requireSodaSession() },
+    query: { aid: PASSPORT.aid, ...extra },
+    body
+  })
+  const code = Number(result.body?.status_code ?? result.body?.code ?? 0)
+  if (code !== 0) {
+    const msg = String(result.body?.status_info?.status_msg || result.body?.message || '')
+    if (/登录.*(失效|过期|重新登录)|未登录|请先登录/.test(msg)) throw new Error('汽水登录已失效，请重新登录')
+    throw new Error(msg || `汽水写入接口异常（${code}）`)
   }
+  return result.body
+}
+
+// 在线红心写入：type=1 的「我喜欢的音乐」就是单曲收藏（track），
+// 与手机端同一套账号数据，写完后由前端重新拉取红心列表校正。
+export async function setSodaLike(id: string, liked: boolean): Promise<void> {
+  const media = [{ type: 'track', id: String(id) }]
+  if (liked) {
+    await pcAccountPost('/luna/pc/me/collection/media', { scene: '', media })
+  } else {
+    await pcAccountPost('/luna/pc/me/collection/media/delete', { media })
+  }
+}
+
+function pcPlaylist(item: any) {
+  if (!item) return null
+  const id = String(item.id || '')
+  const name = String(item.title || item.name || '').trim()
+  if (!id || !name) return null
+  return {
+    id,
+    name,
+    cover: pickUrl(item.url_cover || item.cover || item.cover_url || item.coverUrl),
+    count: Number(item.count_tracks ?? item.track_count ?? item.song_count ?? 0) || 0,
+    // PC 接口把红心歌单标成 type=1，和车机一致
+    specialType: Number(item.type ?? item.playlist_type) === 1 ? 5 : undefined,
+    kind: 'mine' as const
+  }
+}
+
+export async function getSodaPcLibrary() {
+  const [meRaw, listRaw] = await Promise.all([
+    pcAccountGet('/luna/pc/me'),
+    pcAccountGet('/luna/pc/me/playlist', { iid: PASSPORT.iid, version_code: PASSPORT.version_code })
+  ])
+  const info = meRaw?.my_info || meRaw?.user || meRaw || {}
+  // /luna/pc/me 的头像字段是 my_info.larger_avatar_url（ImageX 对象：urls 或 uri+template_prefix）
+  const avatar = pickUrl(info.larger_avatar_url || info.avatar_larger || info.url_avatar || info.avatar || info.avatar_url || info.avatar_url_large || '')
+  const profile = {
+    name: String(info.nickname || info.public_name || info.name || ''),
+    avatar,
+    level: 0,
+    vip: info.is_vip ? 'vip' as const : '' as const,
+    vipKnown: info.is_vip === true
+  }
+  const rows = Array.isArray(listRaw?.playlists) ? listRaw.playlists : []
+  const playlists = rows.map(pcPlaylist).filter(Boolean)
+  return { profile, playlists }
+}
+
+// 红心曲目：先定位「我喜欢的音乐」歌单（type=1），再用 PC 歌单详情接口拉全部曲目。
+// 关键是 getSodaPlaylistTracks 在登录态下走 /luna/pc/playlist/detail，
+// 会带上 App 公开接口拿不到的收藏（软件里 77/192 首就是这么丢的）。
+export async function getSodaPcLikedTracks(): Promise<NonNullable<ReturnType<typeof mapTrack>>[]> {
+  loadSodaSession()
+  if (!sodaCookie) throw new Error('请先登录汽水音乐')
+  const lists = await pcAccountGet('/luna/pc/me/playlist')
+  const playlists = Array.isArray(lists?.playlists) ? lists.playlists : []
+  let liked: any = null
+  // type=1 是「我喜欢的音乐」；部分账号只给名字，做名字兜底
+  for (const raw of playlists) {
+    const type = Number(raw?.type ?? raw?.playlist_type)
+    if (type === 1) { liked = raw; break }
+  }
+  if (!liked) {
+    liked = playlists.find((raw: any) => /^(我喜欢的音乐|收藏的音乐)$/.test(String(raw?.name || ''))) || null
+  }
+  if (!liked?.id) return []
+  return getSodaPlaylistTracks(String(liked.id))
 }
 
 // 汽水封面是 ImageX 对象：只拼 base + uri 会被 CDN 拒绝（400），必须带模板缩放后缀
@@ -792,20 +910,27 @@ function mapPlaylist(raw: any) {
 
 function mapTrack(raw: any) {
   if (!raw?.id) return null
-  const album = raw.album || {}
+  const base = raw.base_info || {}
+  const related = raw.related_info || {}
+  const album = raw.album || related.album || related.album_link || {}
+  const artists = Array.isArray(raw.artists) ? raw.artists
+    : Array.isArray(related.artist_links) ? related.artist_links
+      : Array.isArray(related.artists) ? related.artists : []
   return {
-    songmid: String(raw.id),
-    name: String(raw.name || ''),
-    singer: (Array.isArray(raw.artists) ? raw.artists : [])
+    songmid: String(raw.id || base.id),
+    // 部分曲目的名字在 base_info 里（与车机侧一致），兼容两种结构
+    name: String(raw.name || base.name || base.title || '').trim() || '未知曲目',
+    singer: artists
       // 官方曲目的 artists 是对象，原创原声是 user_info，旧接口里偶尔是纯字符串
-      .map((artist: any) => typeof artist === 'string' ? artist : artist?.name || artist?.user_info?.nickname || '')
+      .map((artist: any) => typeof artist === 'string' ? artist : artist?.name || artist?.simple_display_name || artist?.user_info?.nickname || '')
       .filter(Boolean)
       .join(' / '),
     album: String(album.name || ''),
     // 汽水的时长是毫秒
-    duration: Math.round(Number(raw.duration || 0) / 1000),
-    img: pickUrl(album.url_cover || album.cover_url),
-    // 只有“必须会员才能播放”才算 VIP；only_vip_download 只限制下载品质
+    duration: Math.round(Number(raw.duration || base.duration_ms || base.duration || 0) / 1000),
+    img: pickUrl(album.url_cover || album.cover_url || raw.display_info?.cover_url || raw.display_info?.url_cover),
+    // 只有"必须会员才能播放"才算 VIP；only_vip_download 只限制下载品质，
+    // quality_map 里的 need_vip 只是高音质档限制，免费歌也带，不能据此判 VIP
     vip: raw.label_info?.only_vip_playable ? 'vip' as const : '' as const,
     // 原创原声（ugc_clip）没有可解析的播放地址，列表里保留但标灰
     noSource: raw.media_type === 'ugc_clip',
@@ -816,16 +941,11 @@ function mapTrack(raw: any) {
 // 一次 discover/mix 最多只给 8–10 个歌单，且不同批次有重复；探索墙要铺满 60 格，
 // 所以并发多取几份再按 id 去重（多取两份，保证按 id/名字/封面去重后仍够 60 张不重复封面）。
 const RECOMMEND_BATCHES = 12
-let recommendCache: { session: string; at: number; value: NonNullable<ReturnType<typeof mapPlaylist>>[] } | null = null
+let recommendCache: { at: number; value: NonNullable<ReturnType<typeof mapPlaylist>>[] } | null = null
 
 export async function getSodaRecommendations(limit = 60, force = false) {
-  loadSodaSession()
-  // 探索推荐只对登录账号开放，避免匿名设备拉到不属于用户的公共内容
-  if (!sodaCookie) throw new Error('请先登录汽水音乐')
-  // 缓存按凭据指纹区分，换账号后不会先闪出上一个账号的推荐
-  const sessionKey = createHash('sha1').update(sodaCookie).digest('hex').slice(0, 12)
-  if (!force && recommendCache && recommendCache.session === sessionKey &&
-      recommendCache.value.length >= limit && Date.now() - recommendCache.at < 5 * 60_000) {
+  // 探索墙是公开内容，登录门槛由界面控制，这里只做缓存
+  if (!force && recommendCache && recommendCache.value.length >= limit && Date.now() - recommendCache.at < 5 * 60_000) {
     return recommendCache.value.slice(0, limit)
   }
   // 这是 App 公开接口：带上网页登录 cookie 会被判成异常设备（ERR_REQUEST_FORBIDDEN）
@@ -866,54 +986,44 @@ export async function getSodaRecommendations(limit = 60, force = false) {
     }
   }
   if (!playlists.length) throw firstError || new Error('汽水推荐暂时没有返回内容')
-  recommendCache = { session: sessionKey, at: Date.now(), value: playlists }
+  recommendCache = { at: Date.now(), value: playlists }
   return playlists.slice(0, limit)
 }
 
-// 官方推荐队列（/luna/feed/song-tab）：首屏一次给一页歌曲，等价客户端的自动播放。
-export async function getSodaFeedTracks(limit = 50) {
-  const cookie = requireSodaSession()
-  const headers = { ...PC_APP_HEADERS, Cookie: cookie }
+// 手机 App 歌单详情：用 App UA 请求，条目与客户端一致；带网页 cookie 会被判异常设备
+async function getPublicPlaylistTracks(playlistId: string) {
   const tracks: NonNullable<ReturnType<typeof mapTrack>>[] = []
-  const played: { media_id: string; type: string; duration: number; played_mills: number }[] = []
-  const seen = new Set<string>()
-  const firstUse = Math.floor(Date.now() / 1000)
-  let statusMsg = ''
-  // 官方推荐流一次只回 6 首；带上已取到的条目继续请求，攒够一屏队列
-  const maxPages = Math.max(3, Math.ceil(limit / 6))
-  for (let page = 0; page < maxPages && tracks.length < limit; page += 1) {
-    const payload = JSON.stringify({
-      played_media: played,
-      did_first_use_time: firstUse,
-      is_first_request: page === 0,
-      is_did_first_request: page > 0,
-      feed_counts: { mix_session_count: 1 }
-    })
-    const body = await requestJson(`${PC_API}/luna/pc/feed/song-tab`, {
+  let cursor = ''
+  const headers = APP_HEADERS
+  // 接口一页最多 50 首，最多翻 5 页，够覆盖长歌单的常用部分
+  for (let page = 0; page < 5; page += 1) {
+    const body = await requestJson(`${LUNA_API}/luna/playlist/detail`, {
       method: 'POST',
-      headers: {
-        ...headers,
-        'X-SS-STUB': createHash('md5').update(payload).digest('hex').toUpperCase()
-      },
-      query: pcAppParams(),
-      body: payload
+      headers,
+      body: { playlist_id: String(playlistId), count: 50, ...(cursor ? { cursor } : {}) }
     })
-    statusMsg = String(body?.status_info?.status_msg || '')
-    const items = Array.isArray(body?.items) ? body.items : []
-    let fresh = 0
-    for (const item of items) {
-      if (item?.type !== 'track') continue
-      const track = mapTrack(item?.entity?.track_wrapper?.track || item?.entity?.track || item?.track)
-      if (!track || !track.name || seen.has(track.songmid)) continue
-      seen.add(track.songmid)
+    const resources = Array.isArray(body?.media_resources) ? body.media_resources : []
+    console.info(`[汽水] App 歌单第 ${page + 1} 页返回 ${resources.length} 条 (id=${playlistId})`)
+    for (const [index, resource] of resources.entries()) {
+      // 与车机 publicTrack 同款的路径集合：有的曲目裹在 entity.media.track_entity 里，
+      // 只认 entity.track 会把它当成空条目丢掉（“Fever Pitch” 就是这类）
+      const track = mapTrack(
+        resource?.entity?.track_wrapper?.track
+        || resource?.entity?.media?.track_entity
+        || resource?.entity?.track_entity
+        || resource?.entity?.track
+        || resource?.track_entity
+        || resource?.track
+      )
+      console.info(`[汽水]   ${index + 1}. ${track ? `${track.name} / ${track.singer} / ${track.duration}s` : '未解析出曲目'}`)
+      // 与车机路径一致：同一首歌出现多次就保留多次，缺名字也按条目保留，数量对齐手机端
+      if (!track) continue
       tracks.push(track)
-      played.push({ media_id: track.songmid, type: 'track', duration: track.duration, played_mills: -1 })
-      fresh += 1
     }
-    if (!items.length || !fresh) break
+    cursor = body?.next_cursor ? String(body.next_cursor) : ''
+    if (!cursor) break
   }
-  if (!tracks.length) throw new Error(statusMsg || '汽水推荐暂时没有返回歌曲')
-  return tracks.slice(0, limit)
+  return tracks
 }
 
 // 登录后走 PC 歌单详情：公开 App 接口只回可公开播放的资源（77/192 就是这么丢的），
@@ -930,7 +1040,12 @@ async function getPcPlaylistTracks(playlistId: string) {
     })
     const resources = Array.isArray(body?.media_resources) ? body.media_resources : []
     for (const resource of resources) {
-      const raw = resource?.entity?.track_wrapper?.track || resource?.entity?.track || resource?.track
+      const raw = resource?.entity?.track_wrapper?.track
+        || resource?.entity?.media?.track_entity
+        || resource?.entity?.track_entity
+        || resource?.entity?.track
+        || resource?.track_entity
+        || resource?.track
       if (!raw || raw.status) continue
       const track = mapTrack(raw)
       if (!track || !track.name || seen.has(track.songmid)) continue
@@ -941,33 +1056,6 @@ async function getPcPlaylistTracks(playlistId: string) {
     if (!resources.length || !next || next === cursor || seenCursors.has(next)) break
     seenCursors.add(next)
     cursor = next
-  }
-  return tracks
-}
-
-// 未登录时仍用公开接口（数量会少，只包含公开可听的曲目）
-async function getPublicPlaylistTracks(playlistId: string) {
-  const tracks: NonNullable<ReturnType<typeof mapTrack>>[] = []
-  const seen = new Set<string>()
-  let cursor = ''
-  // 同上：公开歌单详情接口不接受网页登录 cookie
-  const headers = APP_HEADERS
-  // 接口一页最多 50 首，最多翻 5 页，够覆盖长歌单的常用部分
-  for (let page = 0; page < 5; page += 1) {
-    const body = await requestJson(`${LUNA_API}/luna/playlist/detail`, {
-      method: 'POST',
-      headers,
-      body: { playlist_id: String(playlistId), count: 50, ...(cursor ? { cursor } : {}) }
-    })
-    const resources = Array.isArray(body?.media_resources) ? body.media_resources : []
-    for (const resource of resources) {
-      const track = mapTrack(resource?.entity?.track_wrapper?.track || resource?.entity?.track || resource?.track)
-      if (!track || !track.name || seen.has(track.songmid)) continue
-      seen.add(track.songmid)
-      tracks.push(track)
-    }
-    cursor = body?.next_cursor ? String(body.next_cursor) : ''
-    if (!cursor) break
   }
   return tracks
 }
@@ -1023,7 +1111,7 @@ function pcSearchParams(keyword: string) {
 // 汽水匿名的歌曲搜索接口需要 App 签名，目前只开放歌单搜索
 export async function searchSodaPlaylists(keyword: string) {
   const body = await requestJson(`${PC_API}/luna/pc/search/playlist`, {
-    headers: withSession(PC_HEADERS),
+    headers: PC_HEADERS,
     query: pcSearchParams(keyword)
   })
   const groups = Array.isArray(body?.result_groups) ? body.result_groups : []
@@ -1037,55 +1125,6 @@ export async function searchSodaPlaylists(keyword: string) {
     playlists.push(playlist)
   }
   return playlists
-}
-
-/* ============ 账号资料与我的歌单 ============ */
-function mapProfile(raw: any) {
-  const info = raw?.my_info || raw?.user || raw || {}
-  const vipInfo = info.vip_info || info.vipInfo || {}
-  // 汽水不提供成长等级，只给会员阶段；不同接口版本字段位置略有差异，这里统一兜底
-  const stage = String(info.vip_stage || vipInfo.vip_stage || '').toLowerCase()
-  const svip = stage.includes('svip') || info.is_svip === true || vipInfo.is_svip === true
-  const vip = info.is_vip === true || vipInfo.is_vip === true || stage.includes('vip')
-  const vipTier: '' | 'vip' | 'svip' = svip ? 'svip' : vip ? 'vip' : ''
-  // 只有接口确实下发了会员字段才敢判定为非会员；否则交给服务端按实际权限兜底，避免误拦真会员
-  const vipKnown =
-    info.vip_stage != null || vipInfo.vip_stage != null ||
-    typeof info.is_vip === 'boolean' || typeof vipInfo.is_vip === 'boolean' ||
-    typeof info.is_svip === 'boolean' || typeof vipInfo.is_svip === 'boolean' ||
-    (vipInfo && typeof vipInfo === 'object' && Object.keys(vipInfo).length > 0)
-  return {
-    name: String(info.nickname || info.name || ''),
-    avatar: pickUrl(
-      info.larger_avatar_url || info.medium_avatar_url ||
-      info.avatar_url || info.avatar || info.avatar_thumb || info.avatar_large || info.avatar_medium
-    ),
-    level: Number(info.level || 0) || 0,
-    vip: vipTier,
-    vipKnown
-  }
-}
-
-export async function getSodaLibrary() {
-  const cookie = requireSodaSession()
-  const headers = { ...PC_HEADERS, Cookie: cookie }
-  const [me, lists] = await Promise.all([
-    requestJson(`${PC_API}/luna/pc/me`, { headers, query: { aid: PASSPORT.aid } }),
-    requestJson(`${PC_API}/luna/pc/me/playlist`, {
-      headers,
-      query: { aid: PASSPORT.aid, iid: PASSPORT.iid, version_code: PASSPORT.version_code }
-    })
-  ])
-  const profile = mapProfile(me)
-  const seen = new Set<string>()
-  const playlists: NonNullable<ReturnType<typeof mapPlaylist>>[] = []
-  for (const raw of Array.isArray(lists?.playlists) ? lists.playlists : []) {
-    const playlist = mapPlaylist(raw)
-    if (!playlist || !playlist.name || seen.has(playlist.id)) continue
-    seen.add(playlist.id)
-    playlists.push({ ...playlist, kind: 'mine' })
-  }
-  return { profile, playlists }
 }
 
 interface SodaAudioVariant {
@@ -1112,10 +1151,12 @@ interface SodaSong {
 
 const songCache = new Map<string, { at: number; value: SodaSong }>()
 
-// 分享页 H5 只给约 30 秒的试听片段；完整音源需要登录态，先按试听接入
-async function fetchSodaSong(trackId: string): Promise<SodaSong> {
-  const cached = songCache.get(trackId)
-  if (cached && Date.now() - cached.at < 10 * 60_000) return cached.value
+// 分享页 H5 只给试听片段；完整音源走车机协议（qishui-api），这里只做兜底
+async function fetchSodaSong(trackId: string, force = false): Promise<SodaSong> {
+  if (!force) {
+    const cached = songCache.get(trackId)
+    if (cached && Date.now() - cached.at < 10 * 60_000) return cached.value
+  }
   const body = await requestJson(`${LUNA_API}/luna/h5/seo_track`, {
     headers: WEB_HEADERS,
     query: { track_id: trackId, device_platform: 'web' }
@@ -1156,10 +1197,18 @@ async function fetchSodaSong(trackId: string): Promise<SodaSong> {
   return value
 }
 
-// 从音源的 mp4 容器里读真实时长；读不到返回 0，交给上层按“无试听限制”处理
-async function streamDuration(url: string) {
+// 从音源的 mp4 容器里读真实时长，同时顺带确认链接还能用：
+// 汽水下发的签名地址会过期，读到 403/404 就当作过期，交给上层换一份新地址
+type ProbeResult =
+  | { state: 'ok'; seconds: number }
+  | { state: 'stale' }
+  | { state: 'unknown' }
+
+export async function probeAudio(url: string): Promise<ProbeResult> {
   try {
     const response = await fetch(url, { headers: { Range: 'bytes=0-16383' }, signal: AbortSignal.timeout(8000) })
+    if ([401, 403, 404, 410].includes(response.status)) return { state: 'stale' }
+    if (!response.ok) return { state: 'unknown' }
     const buffer = Buffer.from(await response.arrayBuffer())
     const index = buffer.indexOf('mvhd')
     if (index >= 4) {
@@ -1167,23 +1216,52 @@ async function streamDuration(url: string) {
       const timescale = version === 1 ? buffer.readUInt32BE(index + 24) : buffer.readUInt32BE(index + 16)
       const duration = version === 1 ? Number(buffer.readBigUInt64BE(index + 28)) : buffer.readUInt32BE(index + 20)
       const seconds = timescale ? duration / timescale : 0
-      if (seconds > 0) return Math.round(seconds)
+      if (seconds > 0) return { state: 'ok', seconds: Math.round(seconds) }
     }
-  } catch { /* 时长读不出来就不提示试听 */ }
-  return 0
+    return { state: 'ok', seconds: 0 }
+  } catch {
+    // 本机网络抖动也会让探测失败，这时不能把链接判死，交给播放器自己试
+    return { state: 'unknown' }
+  }
 }
 
-export async function getSodaSongUrl(trackId: string, quality = 'highest') {
-  const song = await fetchSodaSong(trackId)
-  const variant = song.variants.find(item => item.quality === quality) || song.variants[0]
-  if (!variant) throw new Error('这首曲子暂时没有可试听的音源')
-  const seconds = await streamDuration(variant.url)
+interface VariantPick {
+  kind: 'ok'
+  variant: SodaAudioVariant
+  seconds: number
+}
+
+// 优先用用户选的档位，链接过期就换下一档；全部过期返回 stale，一档都探测不了先给首选
+async function pickSodaVariant(song: SodaSong, quality: string): Promise<VariantPick | 'stale' | 'empty'> {
+  const preferred = song.variants.find(item => item.quality === quality)
+  const ordered = preferred
+    ? [preferred, ...song.variants.filter(item => item !== preferred)]
+    : song.variants
+  if (!ordered.length) return 'empty'
+  for (const variant of ordered) {
+    const probe = await probeAudio(variant.url)
+    if (probe.state === 'ok') return { kind: 'ok', variant, seconds: probe.seconds }
+    if (probe.state === 'unknown') return { kind: 'ok', variant, seconds: 0 }
+  }
+  return 'stale'
+}
+
+export async function getSodaSongUrl(trackId: string, quality = 'highest', force = false) {
+  let song = await fetchSodaSong(trackId, force)
+  let pick = await pickSodaVariant(song, quality)
+  // 缓存的签名链接过期，或 H5 这次没下发音频：绕过缓存重新取一次
+  if (pick === 'stale' || pick === 'empty') {
+    song = await fetchSodaSong(trackId, true)
+    const retried = await pickSodaVariant(song, quality)
+    if (retried !== 'empty') pick = retried
+  }
+  if (pick === 'empty' || pick === 'stale') throw new Error('这首曲子暂时没有可试听的音源')
   // 免费歌曲拿到的是完整音源，只有明显短于目录时长的才是试听片段
-  const trialSeconds = seconds > 0 && song.duration > 0 && seconds < song.duration - 5 ? seconds : 0
+  const trialSeconds = pick.seconds > 0 && song.duration > 0 && pick.seconds < song.duration - 5 ? pick.seconds : 0
   return {
-    url: variant.url,
+    url: pick.variant.url,
     trialSeconds,
-    quality: { level: variant.quality, bitrate: variant.bitrate }
+    quality: { level: pick.variant.quality, bitrate: pick.variant.bitrate }
   }
 }
 
@@ -1314,11 +1392,14 @@ function clipLyric(lyric: string, yrc: string, offsetSec: number, clipSeconds: n
   return { lyric: lrcLines.join('\n'), yrc: yrcLines.join('\n') }
 }
 
+// 车机协议下发的 krc 与分享页同格式，统一走同一套解析与试听裁剪
+export function formatSodaLyric(content: string, clipStartSec = 0, clipSeconds = 0) {
+  const parsed = parseSodaLyric(content)
+  return clipStartSec > 0 ? clipLyric(parsed.lyric, parsed.yrc, clipStartSec, clipSeconds) : parsed
+}
+
 export async function getSodaLyrics(trackId: string) {
   const song = await fetchSodaSong(trackId)
-  const parsed = parseSodaLyric(song.lyric)
-  const clipped = song.clipStart > 0
-    ? clipLyric(parsed.lyric, parsed.yrc, song.clipStart, song.clipSeconds)
-    : parsed
+  const clipped = formatSodaLyric(song.lyric, song.clipStart, song.clipSeconds)
   return { lyric: clipped.lyric, translation: '', yrc: clipped.yrc, ytlyric: '' }
 }

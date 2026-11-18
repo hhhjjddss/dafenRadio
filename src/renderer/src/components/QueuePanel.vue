@@ -21,7 +21,7 @@
         <span class="item-copy">
           <span class="item-title">
             <strong>{{ track.name }}</strong>
-            <i v-if="track.vip" class="vip-tag" :class="track.vip">{{ track.vip === 'paid' ? '付费' : 'VIP' }}</i>
+            <i v-if="track.vip" class="vip-tag" :class="[track.vip, { soda: track.platform === 'soda' && track.vip === 'vip' }]">{{ track.vip === 'paid' ? '付费' : 'VIP' }}</i>
           </span>
           <small>{{ track.singer }}</small>
         </span>
@@ -43,7 +43,7 @@
         <small>下一首播放</small>
         <span class="item-title">
           <strong>{{ nextTrack.name }}</strong>
-          <i v-if="nextTrack.vip" class="vip-tag" :class="nextTrack.vip">{{ nextTrack.vip === 'paid' ? '付费' : 'VIP' }}</i>
+          <i v-if="nextTrack.vip" class="vip-tag" :class="[nextTrack.vip, { soda: nextTrack.platform === 'soda' && nextTrack.vip === 'vip' }]">{{ nextTrack.vip === 'paid' ? '付费' : 'VIP' }}</i>
         </span>
         <em>{{ nextTrack.singer }}</em>
       </span>
@@ -206,6 +206,16 @@ function formatDuration(duration?: number) {
 
 .vip-tag.vip { color: #a9770c; border: 1px solid rgba(169, 119, 12, 0.35); background: rgba(212, 168, 83, 0.14); }
 .vip-tag.paid { color: var(--copper); border: 1px solid rgba(185, 98, 120, 0.32); background: rgba(185, 98, 120, 0.1); }
+/* 汽水列表会员标：借网易云的方角描边样式，配色保留汽水绿 */
+.vip-tag.soda {
+  padding: 0 4px;
+  border: 1px solid rgba(4, 120, 60, 0.55);
+  border-radius: 4px;
+  background: linear-gradient(180deg, #02803f, #187f4c 58%, #3d9e6f);
+  color: #51f53c;
+  font-weight: 700;
+   
+}
 
 .item-copy small {
   overflow: hidden;

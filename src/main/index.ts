@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, session, shell, Tray } from 'electron'
 import { join, dirname } from 'path'
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync } from 'fs'
-import { mkdir, readdir, rm, stat, writeFile } from 'fs/promises'
+import { mkdir, readdir, rename, rm, stat, writeFile } from 'fs/promises'
 
 // 修复 Windows 下控制台日志中文乱码：强制 stdout/stderr 使用 UTF-8
 if (process.platform === 'win32') {
@@ -13,19 +13,25 @@ if (process.platform === 'win32') {
 }
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { beginNeteaseLogin, getNeteaseCollectionTracks, getNeteaseHeartbeat, getNeteaseLibrary, getNeteaseLikedSongs, getNeteaseLoginState, getNeteaseLyrics, getNeteasePersonalFm, getNeteaseSessionInfo, getNeteaseSongUrl, hasNeteaseSession, logoutNetease, neteaseCacheDir, scrobbleNetease, searchNetease, searchNeteaseLyrics, setNeteaseLike, stopNeteaseApi } from './netease-api'
-import { beginSodaLogin, getSodaFeedTracks, getSodaLibrary, getSodaLoginState, getSodaLyrics, getSodaPlaylistTracks, getSodaRecommendations, getSodaSessionInfo, getSodaSongUrl, hasSodaSession, logoutSoda, searchSodaPlaylists } from './soda-api'
+import { beginSodaLogin, getSodaLyrics, getSodaPcLibrary, getSodaPcLikedTracks, getSodaPlaylistTracks, getSodaRecommendations, getSodaSongUrl, getSodaLoginState, hasSodaSession, logoutSoda, refreshSodaSessionInfo, searchSodaPlaylists, setSodaLike } from './soda-api'
 import { closeAllSignerSessions, stopSignerAssets } from './soda-signer'
+import { getQishuiAudio, getQishuiFeedTracks, getQishuiLyrics, getQishuiPlaylistTracks, getQishuiSearchPlaylists } from './qishui-api'
 import { searchOnlineLyrics } from './lyrics'
+
+// 汽水取流：车机协议优先（登录后按账号权限下发），失败回退分享页 H5（自带签名过期重试）
+async function resolveSodaPlayback(songId: string, quality?: string, force?: boolean) {
+  try {
+    return await getQishuiAudio(songId, quality)
+  } catch (error: any) {
+    console.warn('[汽水] 车机音源取流失败，回退 H5:', error?.message || error)
+    return getSodaSongUrl(songId, quality, Boolean(force))
+  }
+}
 
 // 透明窗口默认退回灰度抗锯齿，强制 LCD 次像素渲染让小字号中文更清晰
 if (process.platform === 'win32') {
   app.commandLine.appendSwitch('enable-lcd-text')
 }
-// 汽水签名页跑在 127.0.0.1，护照 cookie 属于跨站 cookie；关掉 Chromium 的
-// 第三方 cookie 限制，否则确认后的登录态写不进签名页分区（对齐参考实现）
-app.commandLine.appendSwitch('disable-features', 'BlockThirdPartyCookies,ThirdPartyStoragePartitioning')
-
-
 // 数据统一放在 userData/data：收藏、两个平台的登录态与缓存都在这里。
 // 安装目录/工作目录在打包后可能无写权限（如 Program Files），不再允许自选目录
 const DATA_DIR = join(app.getPath('userData'), 'data')
@@ -260,6 +266,8 @@ type TrayPlayerState = {
   artist: string
   cover: string
   playing: boolean
+  // 切歌取流中：桌面歌词条据此显示 logo 跳动动画
+  loading: boolean
   hasTrack: boolean
   platform: 'netease' | 'soda'
   vip: string
@@ -273,6 +281,7 @@ const EMPTY_TRAY_STATE: TrayPlayerState = {
   artist: '',
   cover: '',
   playing: false,
+  loading: false,
   hasTrack: false,
   platform: 'netease',
   vip: '',
@@ -554,9 +563,11 @@ function createWindow(): void {
     mainWindow?.hide()
     if (trayPanel && !trayPanel.isDestroyed() && trayPanel.isVisible()) trayPanel.hide()
   })
-  // 主窗口销毁时连同隐藏的汽水签名页一起回收，避免它把应用留在后台
   mainWindow.on('closed', () => {
     mainWindow = null
+    // 窗口重建后不能沿用上一轮的全屏标记，否则会把普通窗口当成全屏处理
+    windowFullscreen = false
+    fullscreenWasMaximized = false
     closeAllSignerSessions()
   })
 
@@ -596,8 +607,16 @@ app.whenReady().then(() => {
 
   // 汽水音源放在抖音 CDN：请求只要带 Referer 就回 403 HTML，媒体元素又无法用
   // referrerPolicy 关掉它，只能在网络层剥掉，否则 <audio> 会报 Format error。
+  // 车机协议下发的地址还会落在 365yg / bytefcdn 等同类 CDN 上。
   session.defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: ['*://*.douyinvod.com/*'] },
+    { urls: [
+      '*://*.douyinvod.com/*',
+      '*://*.365yg.com/*',
+      '*://*.douyinscdn.com/*',
+      '*://*.bytefcdn.com/*',
+      '*://*.byteicdn.com/*',
+      '*://*.ibytedtos.com/*'
+    ] },
     (details, callback) => {
       const headers: Record<string, string> = { ...details.requestHeaders }
       for (const key of Object.keys(headers)) {
@@ -778,22 +797,23 @@ app.whenReady().then(() => {
     catch (error: any) { return { success: false, error: error.message } }
   })
   // 播放地址按平台分流；音质偏好由渲染进程传入，平台缺该档位时会自动降级
-  ipcMain.handle('player:play', async (_, songId: string, platform: string, quality?: string) => {
+  // force 表示绕过缓存重新取地址（汽水签名链接失效后播放器会重试一次）
+  ipcMain.handle('player:play', async (_, songId: string, platform: string, quality?: string, force?: boolean) => {
     try {
       const data = platform === 'soda'
-        ? await getSodaSongUrl(songId, quality)
+        ? await resolveSodaPlayback(songId, quality, Boolean(force))
         : await getNeteaseSongUrl(songId, quality)
       return { success: true, data }
     } catch (error: any) { return { success: false, error: error.message } }
   })
 
-  // 汽水音乐：推荐（需登录）、歌单、歌单搜索、歌词
+  // 汽水音乐：账号、歌单与推荐走车机协议，公开内容失败时回退 H5 分享页
   ipcMain.handle('soda:recommend', async (_, force?: boolean) => {
     try { return { success: true, data: await getSodaRecommendations(60, Boolean(force)) } }
     catch (error: any) { return { success: false, error: error.message } }
   })
   ipcMain.handle('soda:feed', async (_, count = 50) => {
-    try { return { success: true, data: await getSodaFeedTracks(count) } }
+    try { return { success: true, data: await getQishuiFeedTracks(count) } }
     catch (error: any) { return { success: false, error: error.message } }
   })
   ipcMain.handle('soda:loginQr', async () => {
@@ -805,24 +825,53 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('soda:loginState', () => ({ success: true, data: getSodaLoginState() }))
   ipcMain.handle('soda:configured', () => ({ success: true, data: hasSodaSession() }))
-  ipcMain.handle('soda:sessionInfo', async () => ({ success: true, data: await getSodaSessionInfo() }))
-  ipcMain.handle('soda:logout', () => {
+  ipcMain.handle('soda:sessionInfo', async () => ({ success: true, data: await refreshSodaSessionInfo() }))
+  ipcMain.handle('soda:logout', async () => {
     try { logoutSoda(); return { success: true } }
     catch (error: any) { return { success: false, error: error.message } }
   })
   ipcMain.handle('soda:library', async () => {
-    try { return { success: true, data: await getSodaLibrary() } }
+    try { return { success: true, data: await getSodaPcLibrary() } }
     catch (error: any) { return { success: false, error: error.message } }
+  })
+  ipcMain.handle('soda:liked', async () => {
+    try { return { success: true, data: await getSodaPcLikedTracks() } }
+    catch (error: any) { return { success: false, error: error.message } }
+  })
+  ipcMain.handle('soda:like', async (_, songId: string, liked: boolean) => {
+    // 收藏走 PC 账号写入，和手机端同一套红心数据；失败时把错误交回前端回滚本地收藏。
+    try {
+      await setSodaLike(songId, liked)
+      return { success: true }
+    } catch (error: any) {
+      return { success: false, error: String(error?.message || error || '在线红心写入失败') }
+    }
   })
   ipcMain.handle('soda:playlist', async (_, playlistId: string) => {
+    // 手机 App 接口与客户端看到的歌单条目一致（含只在 App 下可见的曲目），作为主路径。
+    // 车机协议可见曲目更少，只在 App 接口失败时兜底。
     try { return { success: true, data: await getSodaPlaylistTracks(playlistId) } }
-    catch (error: any) { return { success: false, error: error.message } }
+    catch (error: any) {
+      console.warn('[汽水] App 歌单读取失败，回退车机:', error?.message || error)
+      try { return { success: true, data: await getQishuiPlaylistTracks(playlistId) } }
+      catch (fallback: any) { return { success: false, error: fallback.message || error.message } }
+    }
   })
   ipcMain.handle('soda:searchPlaylists', async (_, keyword: string) => {
-    try { return { success: true, data: await searchSodaPlaylists(keyword) } }
-    catch (error: any) { return { success: false, error: error.message } }
+    try { return { success: true, data: await getQishuiSearchPlaylists(keyword) } }
+    catch (error: any) {
+      console.warn('[汽水] 车机歌单搜索失败，回退 H5:', error?.message || error)
+      try { return { success: true, data: await searchSodaPlaylists(keyword) } }
+      catch (fallback: any) { return { success: false, error: fallback.message || error.message } }
+    }
   })
   ipcMain.handle('soda:lyrics', async (_, songId: string) => {
+    try {
+      const data = await getQishuiLyrics(songId)
+      if (data) return { success: true, data }
+    } catch (error: any) {
+      console.warn('[汽水] 车机歌词读取失败，回退 H5:', error?.message || error)
+    }
     try { return { success: true, data: await getSodaLyrics(songId) } }
     catch (error: any) { return { success: false, error: error.message } }
   })
@@ -830,9 +879,24 @@ app.whenReady().then(() => {
   // 封面取色：主进程解码图片，避免渲染进程的跨域限制
   ipcMain.handle('theme:palette', async (_, url: string) => {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+      // 只允许公网 http(s) 图片，避免渲染进程借主进程访问本机/内网服务
+      let parsed: URL
+      try { parsed = new URL(String(url)) } catch { throw new Error('封面地址无效') }
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error('封面地址无效')
+      const host = parsed.hostname.toLowerCase()
+      if (
+        host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0'
+        || /^(127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(host)
+        || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+        || host === '::1' || host === '[::1]'
+      ) throw new Error('封面地址无效')
+      const response = await fetch(parsed.toString(), { signal: AbortSignal.timeout(15000) })
       if (!response.ok) throw new Error(`图片请求失败（HTTP ${response.status}）`)
+      const MAX_BYTES = 5 * 1024 * 1024
+      const length = Number(response.headers.get('content-length') || 0)
+      if (length > MAX_BYTES) throw new Error('封面图片过大')
       const buffer = Buffer.from(await response.arrayBuffer())
+      if (buffer.length > MAX_BYTES) throw new Error('封面图片过大')
       const image = nativeImage.createFromBuffer(buffer)
       if (image.isEmpty()) throw new Error('图片解码失败')
       const small = image.resize({ width: 24, height: 24, quality: 'good' })
@@ -880,7 +944,10 @@ app.whenReady().then(() => {
     try {
       await mkdir(DATA_DIR, { recursive: true })
       const file = favoritesFile()
-      await writeFile(file, JSON.stringify(data), 'utf-8')
+      const temp = `${file}.tmp`
+      // 先写临时文件再改名：写入中途失败不会留下截断的收藏文件
+      await writeFile(temp, JSON.stringify(data), 'utf-8')
+      await rename(temp, file)
       console.log('[Favorites] 已保存', data.length, '首歌曲到', file)
       return true
     } catch (e: any) {

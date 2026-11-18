@@ -5,12 +5,15 @@
       <button class="lyric-cover" type="button" aria-label="显示主窗口" @click="openMain">
         <img v-if="state.cover && !coverBroken" :src="state.cover" alt="" @error="coverBroken = true" />
         <span v-else class="cover-fallback"><Music2 :size="15" /></span>
+        <span v-if="state.loading" class="cover-loading" aria-hidden="true">
+          <img :src="logoMark" alt="" />
+        </span>
       </button>
 
       <div class="lyric-meta">
         <span class="lyric-title">
           <strong>{{ state.title || '让音乐开始' }}</strong>
-          <i v-if="vipLabel" class="lyric-vip">{{ vipLabel }}</i>
+          <i v-if="vipLabel" class="lyric-vip" :class="{ soda: state.platform === 'soda' }">{{ vipLabel }}</i>
           <em v-if="state.artist">- {{ state.artist }}</em>
         </span>
         <span class="lyric-line">
@@ -53,12 +56,14 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Heart, Music2, SkipBack, SkipForward, X } from '@lucide/vue'
 import TransportIcon from './TransportIcon.vue'
+import logoMark from '../assets/logo-mark.png'
 
 interface LyricBarState {
   title: string
   artist: string
   cover: string
   playing: boolean
+  loading: boolean
   hasTrack: boolean
   platform: 'netease' | 'soda'
   vip: string
@@ -71,6 +76,7 @@ const EMPTY: LyricBarState = {
   artist: '',
   cover: '',
   playing: false,
+  loading: false,
   hasTrack: false,
   platform: 'netease',
   vip: '',
@@ -185,6 +191,32 @@ onBeforeUnmount(() => {
   color: #191722;
 }
 
+/* 切歌等待：logo 在封面上上下跳动，替代没有反馈的空白期 */
+.cover-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(16, 12, 24, 0.46);
+  pointer-events: none;
+}
+
+.cover-loading img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+  animation: logo-bounce 0.62s ease-in-out infinite alternate;
+}
+
+@keyframes logo-bounce {
+  from { transform: translateY(-3px); }
+  to { transform: translateY(3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cover-loading img { animation: none; }
+}
+
 /* 中段是唯一够大的拖动区：封面和四个控件都退出拖拽，这里再不让拖条就挪不动了 */
 .lyric-meta {
   display: grid;
@@ -204,8 +236,8 @@ onBeforeUnmount(() => {
 .lyric-title strong {
   overflow: hidden;
   color: var(--text-cream);
-  font: 500 12.5px/1.3 var(--font-body);
-  letter-spacing: 0.01em;
+  font: 500 14px/1.3 var(--font-body);
+  letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -215,7 +247,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   max-width: 40%;
   color: var(--text-muted);
-  font: 400 10.5px/1.3 var(--font-body);
+  font: 400 11.5px/1.3 var(--font-body);
   font-style: normal;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -232,14 +264,25 @@ onBeforeUnmount(() => {
   font: 600 8px/1.6 var(--font-mono);
   font-style: normal;
 }
+/* 汽水官方会员标：深绿胶囊 + 荧光绿斜体字，尺寸与网易云标签对齐 */
+.lyric-vip.soda {
+  padding: 0 4px;
+  border: 1px solid rgba(4, 120, 60, 0.55);
+  border-radius: 999px;
+  background: linear-gradient(180deg, #02803f, #187f4c 58%, #3d9e6f);
+  color: #51f53c;
+  font-weight: 700;
+   
+  letter-spacing: 0.02em;
+}
 
 /* 当前歌词和播放条一样用平台强调色 */
 .lyric-line {
   display: block;
   overflow: hidden;
   color: var(--lyric-accent);
-  font: 500 11px/1.35 var(--font-body);
-  letter-spacing: 0.04em;
+  font: 500 12.5px/1.35 var(--font-body);
+  letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -13,11 +13,11 @@
               v-for="tile in galaxyTiles"
               :key="tile.key"
               class="galaxy-tile"
-              :style="tileStyle(tile)"
+              :style="tileStyle()"
             >
             <div class="galaxy">
             <!-- 网格线：横平竖直，落在格子边界上，不穿过封面 -->
-            <svg v-if="!isSquareWall" class="galaxy-map" :viewBox="`0 0 ${GALAXY_W} ${GALAXY_H}`" aria-hidden="true">
+            <svg v-if="!isSquareWall" class="galaxy-map" :viewBox="`0 0 ${galaxyW} ${galaxyH}`" aria-hidden="true">
               <line
                 v-for="line in MAP_LINES"
                 :key="line.key"
@@ -49,26 +49,11 @@
                   <img v-else :src="fallbackCover" alt="" loading="lazy" decoding="async" draggable="false" />
                   <span v-if="card.liked && card.item.cover" class="liked-badge" aria-hidden="true"><Heart :size="11" fill="currentColor" /></span>
                   <span v-if="card.mine" class="mine-badge mono" aria-hidden="true">MINE</span>
+                  <span v-if="isPlayingCard(card) && playing" class="card-eq" aria-hidden="true">
+                    <i></i><i></i><i></i><i></i><i></i><i></i>
+                  </span>
                 </span>
               </button>
-            </div>
-
-            <!-- 空着的格子用空唱片套补齐，不留下整格的空白 -->
-            <div
-              v-if="emptyGhosts.length"
-              class="ghost-wall"
-              :class="{ breathing: loading }"
-              aria-hidden="true"
-            >
-              <span
-                v-for="ghost in emptyGhosts"
-                :key="ghost.key"
-                class="ghost-sleeve"
-                :class="{ blank: ghost.blank }"
-                :style="ghostStyle(ghost)"
-              >
-                <component :is="ghost.icon" :size="26" />
-              </span>
             </div>
             </div>
             </div>
@@ -124,6 +109,9 @@
                         <img v-else :src="fallbackCover" alt="" loading="lazy" decoding="async" draggable="false" />
                         <span v-if="card.liked && card.item.cover" class="liked-badge" aria-hidden="true"><Heart :size="11" fill="currentColor" /></span>
                         <span v-if="card.mine" class="mine-badge mono" aria-hidden="true">MINE</span>
+                        <span v-if="isPlayingCard(card) && playing" class="card-eq" aria-hidden="true">
+                          <i></i><i></i><i></i><i></i><i></i><i></i>
+                        </span>
                       </span>
                     </button>
                   </div>
@@ -144,58 +132,32 @@
         :loading="loadingTracks"
         :error="trackError"
         :queue-open="queueOpen"
+        :wall="collectionWall"
+        :current-songmid="currentSongmid"
+        :playing="playing"
         :fallback-cover="fallbackCover"
         :accent="stagePalette.accent"
         :glow="stagePalette.glow"
         @close="collapse()"
         @play-track="playFromCollection"
+        @toggle-play="emit('toggle-play')"
       />
 
       <!-- 载入：整面骨架格盖住画布，真实封面全部解码完再一次性揭开 -->
       <transition name="loading-fade">
-        <div
+        <WallSkeleton
           v-if="wallLoading && !active"
-          class="skeleton-wall"
-          role="status"
-          aria-live="polite"
-          aria-label="正在载入音乐空间"
-        >
-          <div class="skeleton-field" :style="{ scale: String(galaxyScale) }" aria-hidden="true">
-            <div
-              v-for="tile in galaxyTiles"
-              :key="tile.key"
-              class="skeleton-tile-layer"
-              :style="{ transform: `translate3d(${tile.x}px, ${tile.y}px, 0)` }"
-            >
-              <svg v-if="!isSquareWall" class="galaxy-map" :viewBox="`0 0 ${GALAXY_W} ${GALAXY_H}`" aria-hidden="true">
-                <line
-                  v-for="line in MAP_LINES"
-                  :key="line.key"
-                  class="map-line"
-                  :x1="line.x1"
-                  :y1="line.y1"
-                  :x2="line.x2"
-                  :y2="line.y2"
-                />
-              </svg>
-              <span
-                v-for="cell in wallCells"
-                :key="`${cell.x}-${cell.y}`"
-                class="skeleton-tile"
-                :class="{ square: isSquareWall }"
-                :style="skeletonStyle(cell)"
-              ></span>
-            </div>
-          </div>
-          <div class="skeleton-status">
-            <span class="skeleton-dot" aria-hidden="true"></span>
-            <span class="skeleton-copy">
-              <span class="skeleton-kicker mono">SYNCING LIBRARY</span>
-              <strong>{{ syncTitle }}</strong>
-              <small>{{ syncHint }}</small>
-            </span>
-          </div>
-        </div>
+          class="explore-skeleton"
+          :pitch="WALL_GAP"
+          :tile="isSquareWall ? WALL_GAP + 1 : WALL_COVER"
+          :variant="isSquareWall ? 'square' : 'dot'"
+          :scale="galaxyScale"
+          backdrop
+          label="正在载入音乐空间"
+          status-kicker="SYNCING LIBRARY"
+          :status-title="syncTitle"
+          :status-hint="syncHint"
+        />
       </transition>
       <div v-if="isEmpty && !active && !wallLoading" class="galaxy-empty galaxy-void">
         <span class="void-medallion" aria-hidden="true">
@@ -317,9 +279,11 @@ import type { MusicInfo } from '../composables/useNetease'
 import gsap from 'gsap'
 import { Draggable } from 'gsap/Draggable'
 import { InertiaPlugin } from 'gsap/InertiaPlugin'
-import { ArrowDownRight, ArrowUpRight, Circle, Disc3, Headphones, Heart, LayoutGrid, ListMusic, Music2, Radio, Rows3, Square, Unplug } from '@lucide/vue'
+import { ArrowDownRight, ArrowUpRight, Circle, Disc3, Heart, LayoutGrid, Rows3, Square, Unplug } from '@lucide/vue'
 import CollectionDetail from './CollectionDetail.vue'
+import WallSkeleton from './WallSkeleton.vue'
 import { loadCover } from '../utils/cover'
+import { isLikedPlaylistName, mergeLikedTracks } from '../utils/liked'
 import neteaseLogo from '../assets/platforms/netease.png'
 import qqLogo from '../assets/platforms/qq.png'
 import sodaLogo from '../assets/platforms/soda.png'
@@ -370,6 +334,8 @@ const props = defineProps<{
   mine: ExplorePlaylist[]
   platform: ExplorePlaylist[]
   albums?: ExplorePlaylist[]
+  // 当前是否正在播放：详情列表的均衡器据此决定跳动还是静止
+  playing?: boolean
   favorites: MusicInfo[]
   likedCover: string
   fallbackCover: string
@@ -383,14 +349,23 @@ const props = defineProps<{
   guide?: boolean
   // 播放队列展开时详情页要给右侧队列让位，左栏与列表按比例收缩
   queueOpen?: boolean
+  // 歌单详情用封面格阵展示
+  collectionWall?: boolean
+  // 当前播放歌曲的 songmid，传给详情页标记正在播放的封面
+  currentSongmid?: string
+  // 当前播放歌曲所属的歌单 id：格阵里给那张歌单封面标正在播放
+  playingCollectionId?: string
 }>()
 
 const emit = defineEmits<{
-  (e: 'play-track', track: MusicInfo, queue: MusicInfo[], index: number): void
+  (e: 'play-track', track: MusicInfo, queue: MusicInfo[], index: number, collectionId: string): void
+  (e: 'toggle-play'): void
   (e: 'accent', palette: { accent: string; glow: string } | null): void
   (e: 'open-platform'): void
-  (e: 'collection-open', name: string): void
+  (e: 'collection-open', name: string, kind: 'favorites' | 'playlist'): void
   (e: 'collection-close'): void
+  // 打开红心页时让父组件在后台同步账号红心
+  (e: 'refresh-favorites'): void
   (e: 'open-login'): void
   (e: 'auth-error', message: string): void
 }>()
@@ -410,12 +385,16 @@ const driftProxyEl = ref<HTMLElement | null>(null)
 
 const active = ref<{ id: string; name: string; cover: string; kind: 'playlist' | 'favorites' } | null>(null)
 const activeTracks = ref<MusicInfo[]>([])
+// 红心页先展示本机收藏，账号歌单里的曲目后台补进来后并在这里保持稳定
+const likedServerTracks = ref<MusicInfo[]>([])
 const loadingTracks = ref(false)
 const trackError = ref('')
 const localPalette = ref<{ accent: string; glow: string } | null>(null)
 const dragged = ref(false)
 const driftDragging = ref(false)
-const driftDragY = ref(0)
+// 行云 / 斜列的纵向拖动位移。故意不做成响应式：拖动时每帧改 ref 会让整面封面墙重渲染，
+// 位移统一由 syncDriftRows 直接写 DOM。
+let driftDragY = 0
 const galaxyScale = ref(1)
 
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -587,66 +566,69 @@ function wrapSigned(value: number, period: number) {
 
 function driftRowStyle(row: DriftRow) {
   const { period } = driftGeometry.value
-  const y = wrapSigned(row.baseY + driftDragY.value, period)
-  return { transform: `translateY(calc(-50% + ${y}px))` }
+  const y = wrapSigned(row.baseY + driftDragY, period)
+  return { transform: `translateY(${y}px)` }
 }
 
 /* ============ 布局：横平竖直的歌单格 ============ */
-// 十列六行共 60 格：两个平台的歌单池都够铺满，全墙没有重复封面。
-// 封面尺寸与间距不变，同屏 40 余张，拖动画布翻看其余。
-// 离中心越近越属于你自己，喜欢和自建歌单仍落在正中央区域。
-const WALL_COLS = 10
-const WALL_ROWS = 6
+// 封面尺寸与间距固定；格阵的行列数按实际拿到的封面数量算（见 wallGrid），
+// 拿到多少铺多少，不循环复制凑满，超出画面的部分靠 3×3 平铺在拖动时自然出现。
 const WALL_GAP = 180
 const WALL_COVER = 140
-
-// 画布尺寸必须正好等于歌单格阵列的整数倍：10×180 / 6×180，保证 3×3 平铺无缝衔接。
-// 注意 galaxyTiles 在下方立即求值，GALAXY 常量必须在此之前完成初始化
-const GALAXY_W = WALL_COLS * WALL_GAP
-const GALAXY_H = WALL_ROWS * WALL_GAP
 
 /* ============ 无限画布 ============ */
 // 把同一套星空平铺成 3×3。拖动时让每个 tile 在 3 倍画布范围内环回，
 // 视觉上就是没有边界的星空；歌单只有几个也能一直拖下去。
 const TILE_OFFSETS = [-1, 0, 1]
-const galaxyTiles = TILE_OFFSETS.flatMap((ty, yi) =>
+const galaxyTiles = computed(() => TILE_OFFSETS.flatMap((ty, yi) =>
   TILE_OFFSETS.map((tx, xi) => ({
     key: `${xi}-${yi}`,
     index: yi * 3 + xi,
-    x: tx * GALAXY_W,
-    y: ty * GALAXY_H
+    x: tx * galaxyW.value,
+    y: ty * galaxyH.value
   }))
-)
-const tileOffsets = ref(galaxyTiles.map(({ x, y }) => ({ x, y })))
+))
 
 function wrapOffset(value: number, size: number) {
   const period = size * 3
   return ((value + size * 1.5) % period + period) % period - size * 1.5
 }
 
-function tileStyle(tile: (typeof galaxyTiles)[number]) {
-  const offset = tileOffsets.value[tile.index]
-  // tile 盒子必须与 GALAXY_W/H 同步：硬编码的旧尺寸会让 3×3 副本之间留出
+function tileStyle() {
+  // tile 盒子必须与画布尺寸同步：硬编码的旧尺寸会让 3×3 副本之间留出
   // 与卡片网格错位的缝隙，表现为边缘半张封面 + 中央空白带
   return {
-    transform: `translate3d(${offset.x}px, ${offset.y}px, 0)`,
-    width: `${GALAXY_W}px`,
-    height: `${GALAXY_H}px`,
-    marginLeft: `${-GALAXY_W / 2}px`,
-    marginTop: `${-GALAXY_H / 2}px`
+    width: `${galaxyW.value}px`,
+    height: `${galaxyH.value}px`,
+    marginLeft: `${-galaxyW.value / 2}px`,
+    marginTop: `${-galaxyH.value / 2}px`
   }
+}
+
+// 9 块平铺靠 transform 环回，位移直接写 DOM：
+// 每帧去改 reactive 会让几百张封面的整棵树重渲染，拖起来就是那种一卡一卡的手感
+let tileNodes: HTMLElement[] = []
+function refreshTileNodes() {
+  tileNodes = fieldEl.value
+    ? Array.from(fieldEl.value.querySelectorAll<HTMLElement>('.galaxy-tile'))
+    : []
 }
 
 // 把 track 的位移换算成每个 tile 的相对位移：视觉位置环回，DOM 只保留 9 份。
 function syncTiles() {
   if (!trackEl.value) return
+  if (tileNodes.length !== galaxyTiles.value.length) refreshTileNodes()
   const tx = Number(gsap.getProperty(trackEl.value, 'x')) || 0
   const ty = Number(gsap.getProperty(trackEl.value, 'y')) || 0
-  for (const tile of galaxyTiles) {
-    const offset = tileOffsets.value[tile.index]
-    offset.x = wrapOffset(tile.x + tx, GALAXY_W) - tx
-    offset.y = wrapOffset(tile.y + ty, GALAXY_H) - ty
-  }
+  galaxyTiles.value.forEach((tile, i) => {
+    const node = tileNodes[i]
+    if (!node) return
+    gsap.set(node, {
+      x: wrapOffset(tile.x + tx, galaxyW.value) - tx,
+      y: wrapOffset(tile.y + ty, galaxyH.value) - ty,
+      force3D: true
+    })
+  })
 }
 
 // 进入歌单详情时把画布归位，保证「返回」和曲目始终在视野正中心。
@@ -658,37 +640,17 @@ function resetTrack() {
 }
 
 let draggables: Draggable[] = []
+// 本次按下是否真的拖动过：拖动松手也会触发 click，不能顺带打开歌单
+let dragMoved = false
 let animating = false
 let paletteToken = 0
 let recenterTween: gsap.core.Tween | null = null
 
 /* ============ 布局：横平竖直的歌单格 ============ */
 
-const wallCells = (() => {
-  const cells: { x: number; y: number; ring: number; angle: number }[] = []
-  for (let row = 0; row < WALL_ROWS; row++) {
-    for (let col = 0; col < WALL_COLS; col++) {
-      const x = (col - (WALL_COLS - 1) / 2) * WALL_GAP
-      const y = (row - (WALL_ROWS - 1) / 2) * WALL_GAP
-      cells.push({
-        x,
-        y,
-        // 切比雪夫半径 = 离中心第几圈；同圈再按极角排，格子才会一圈圈绕着中心铺开。
-        // 用欧氏距离在等距方格上会出现斜向插队（如 3.5,0.5 与 2.5,2.5 同距），
-        // 视觉上像从中心斜着扩散，而不是环绕。
-        ring: Math.max(Math.abs(x), Math.abs(y)),
-        angle: Math.atan2(y, x)
-      })
-    }
-  }
-  // 由内向外：第一格必定是最中心，留给「我喜欢的音乐」，其余自建歌单逐圈围上去
-  cells.sort((a, b) => a.ring - b.ring || a.angle - b.angle)
-  return cells.map(({ x, y }) => ({ x, y }))
-})()
-
+// 墙上「我喜欢的音乐」和详情页同一条规则：封面严格取收藏列表第一首
 const likedCover = computed(() =>
-  props.favorites.find(track => !track.unavailable)?.img
-  || props.favorites[0]?.img
+  props.favorites[0]?.img
   || props.likedCover
 )
 
@@ -712,7 +674,7 @@ function wallCover(url: string) {
   return next
 }
 
-// 全量歌单卡：格阵只用到前 60 个，行云/斜列需要更长的序列，用满所有歌单来摊薄重复
+// 全量歌单卡：格阵按顺序循环取用，行云/斜列需要更长的序列，用满所有歌单来摊薄重复
 const cardPicks = computed<WallPick[]>(() => {
   const picks: Omit<WallCard, 'x' | 'y'>[] = []
   const seen = new Set<string>()
@@ -720,8 +682,6 @@ const cardPicks = computed<WallPick[]>(() => {
   const seenCovers = new Set<string>()
   const nameKey = (name: string) => String(name || '').replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase()
   const coverKey = (url: string) => String(url || '').split('?')[0].replace(/~[^/]*$/, '')
-  const isLikedPlaylist = (item: ExplorePlaylist) =>
-    /^我喜欢的(音乐|歌曲)$/.test(String(item.name || '').trim())
   const add = (item: ExplorePlaylist, tag: string, favorite = false) => {
     if (!item?.id || seen.has(item.id)) return
     // 不同来源（自建 / 推荐 / 收藏）常有同名歌单，墙面只留一个入口
@@ -733,7 +693,7 @@ const cardPicks = computed<WallPick[]>(() => {
     seen.add(item.id)
     if (key) seenNames.add(key)
     if (cover) seenCovers.add(cover)
-    const liked = isLikedPlaylist(item)
+    const liked = isLikedPlaylistName(item.name)
     picks.push({ key: item.id, item, favorite, liked, mine: tag === 'MINE' && !liked, tag })
   }
 
@@ -743,9 +703,15 @@ const cardPicks = computed<WallPick[]>(() => {
   // 网易用独立的心形节点锚定正中央；汽水把「我喜欢的音乐」当普通歌单返回，
   // 这里把红心歌单排到自建歌单最前面，两个平台都让「我喜欢的音乐」落在画布正中央
   const minePicks = [...props.mine]
-    .sort((a, b) => Number(isLikedPlaylist(b)) - Number(isLikedPlaylist(a)))
+    .sort((a, b) => Number(isLikedPlaylistName(b.name)) - Number(isLikedPlaylistName(a.name)))
     .slice(0, 24)
-  for (const item of minePicks) add(item, 'MINE')
+  const firstFavoriteCover = likedCover.value
+  for (const item of minePicks) {
+    // 汽水红心歌单的封面来自账号资料，换了第一首收藏也不会跟着变；
+    // 墙上这张卡改成按收藏第一首取图，和详情页保持一致
+    const likedItem = isLikedPlaylistName(item.name)
+    add(likedItem && firstFavoriteCover ? { ...item, cover: firstFavoriteCover } : item, 'MINE')
+  }
 
   const platformTag = props.platformKey === 'soda' ? 'SODA' : 'FOR YOU'
   for (const item of props.platform) add(item, platformTag)
@@ -756,20 +722,60 @@ const cardPicks = computed<WallPick[]>(() => {
   return picks
 })
 
+// 与详情页照片墙同一套铺法：格距固定 180，列数按视口宽度取，行数先铺满视口、
+// 再保证装得下全部歌单。格阵始终大于等于视口，缩放到 1，封面尺寸和详情页一致。
+const wallGrid = computed(() => {
+  const count = Math.max(1, cardPicks.value.length)
+  const cols = Math.min(12, Math.max(4, Math.ceil(viewportSize.value.w / WALL_GAP)))
+  const rows = Math.max(Math.ceil(viewportSize.value.h / WALL_GAP), Math.ceil(count / cols), 1)
+  return { cols, rows }
+})
+
+// 画布尺寸 = 格阵尺寸，3×3 平铺靠它做环回
+const galaxyW = computed(() => wallGrid.value.cols * WALL_GAP)
+const galaxyH = computed(() => wallGrid.value.rows * WALL_GAP)
+
+const wallCells = computed(() => {
+  const { cols, rows } = wallGrid.value
+  const cells: { x: number; y: number; ring: number; angle: number }[] = []
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const x = (col - (cols - 1) / 2) * WALL_GAP
+      const y = (row - (rows - 1) / 2) * WALL_GAP
+      cells.push({
+        x,
+        y,
+        // 切比雪夫半径 = 离中心第几圈；同圈再按极角排，格子才会一圈圈绕着中心铺开。
+        // 用欧氏距离在等距方格上会出现斜向插队（如 3.5,0.5 与 2.5,2.5 同距），
+        // 视觉上像从中心斜着扩散，而不是环绕。
+        ring: Math.max(Math.abs(x), Math.abs(y)),
+        angle: Math.atan2(y, x)
+      })
+    }
+  }
+  // 由内向外：第一格必定是最中心，留给「我喜欢的音乐」，其余自建歌单逐圈围上去
+  cells.sort((a, b) => a.ring - b.ring || a.angle - b.angle)
+  return cells.map(({ x, y }) => ({ x, y }))
+})
+
 const wallCards = computed<WallCard[]>(() => {
   const picks = cardPicks.value
   if (!picks.length) return []
-  // 池子不足整面墙时循环复用补满：格阵的 3×3 平铺本来就依赖重复铺满，
-  // 与其让空格露底（幽灵盘再显眼也像坏块），不如保证墙永远是满的；
-  // 模循环的重复条目与本尊相隔整整一轮，相邻格不会撞封面
-  return wallCells.map((cell, index) => {
-    const pick = picks[index % picks.length]
-    return {
-      ...pick,
-      key: index < picks.length ? pick.key : `${pick.key}-wrap-${index}`,
-      ...cell
-    }
+  // 格位仍按「由内向外」排序，让喜欢的音乐与自建歌单落在中央；
+  // 封面按格循环取，歌单不够铺满视口时继续从头补，整面墙不留空格
+  return wallCells.value.map((cell, index) => {
+    // 每绕完一轮就把起点挪一格（同详情页按列错开）：相邻格不会是同一张封面，
+    // 重复的「我喜欢的音乐」也会落到更外圈，而不是紧贴着正中央
+    const pick = picks[(index + Math.floor(index / picks.length)) % picks.length]
+    // key 不能再用歌单 id：循环补满时同一张卡会出现多次
+    return { ...pick, ...cell, key: `${pick.key}-${index}` }
   })
+})
+
+// 封面数量或视口变化会改格阵行列，tile 盒子尺寸随之变化，环回位移与缩放都要按新尺寸重算
+watch([galaxyW, galaxyH], () => {
+  updateScale()
+  void nextTick(syncTiles)
 })
 
 // 歌单被清空或进入详情时关闭排布菜单，避免遮罩留在没有入口的界面上
@@ -781,15 +787,22 @@ watch(cardPicks, cards => {
 const coverReady = ref(true)
 const readyCovers = new Set<string>()
 let coverReadyToken = 0
+let coverReadyTimer = 0
 watch(cardPicks, (cards) => {
   const urls = [...new Set(
     cards.map(card => wallCover(card.item.cover)).filter((url): url is string => Boolean(url))
   )]
   const pending = urls.filter(url => !readyCovers.has(url))
-  if (!pending.length) return
+  window.clearTimeout(coverReadyTimer)
+  if (!pending.length) { coverReady.value = true; return }
   const token = ++coverReadyToken
   coverReady.value = false
+  // 封面加载慢时最多等 4 秒，不能让骨架一直盖住已经返回的歌单
+  coverReadyTimer = window.setTimeout(() => {
+    if (token === coverReadyToken) coverReady.value = true
+  }, 4000)
   void Promise.all(pending.map(loadCover)).then(() => {
+    window.clearTimeout(coverReadyTimer)
     if (token !== coverReadyToken) return
     for (const url of pending) readyCovers.add(url)
     coverReady.value = true
@@ -805,53 +818,6 @@ const syncHint = computed(() => {
 watch(active, value => {
   if (value) layoutOpen.value = false
 })
-
-/* ============ 空画布的幽灵封面 ============ */
-// 沿画布外圈摆一圈空唱片套，登录前/同步中也有「悬浮封面」的空间感。
-const GHOST_ICONS = [Music2, Heart, ListMusic, Radio, Headphones] as const
-
-interface GhostNode {
-  key: string
-  x: number
-  y: number
-  icon: Component
-  blank: boolean
-  delay: number
-}
-
-const ghostNodes = (() => {
-  const nodes: GhostNode[] = []
-  for (let row = 0; row < WALL_ROWS; row++) {
-    for (let col = 0; col < WALL_COLS; col++) {
-      const seed = row * WALL_COLS + col
-      const blank = seed % 6 === 5
-      nodes.push({
-        key: `ghost-${seed}`,
-        x: (col - (WALL_COLS - 1) / 2) * WALL_GAP,
-        y: (row - (WALL_ROWS - 1) / 2) * WALL_GAP,
-        // 每个空套子都放图标，空白格也要有内容可看
-        icon: GHOST_ICONS[(row + col * 2) % GHOST_ICONS.length],
-        blank,
-        delay: (seed % 5) * 0.34
-      })
-    }
-  }
-  return nodes
-})()
-
-// 只给没有真实歌单的格子铺幽灵套：歌单不足 35 张时，方形墙也不会露底
-const emptyGhosts = computed(() => {
-  const taken = new Set(wallCards.value.map(card => `${card.x},${card.y}`))
-  return ghostNodes.filter(ghost => !taken.has(`${ghost.x},${ghost.y}`))
-})
-
-function ghostStyle(ghost: GhostNode) {
-  return {
-    left: `calc(50% + ${ghost.x}px)`,
-    top: `calc(50% + ${ghost.y}px)`,
-    animationDelay: `${ghost.delay}s`
-  }
-}
 
 const hoverLabel = ref<{ name: string; tag: string; x: number; y: number; above: boolean } | null>(null)
 
@@ -876,7 +842,10 @@ function hideCardLabel() {
 
 function openCard(card: WallPick) {
   hideCardLabel()
-  if (card.favorite) void expandFavorites()
+  if (dragMoved) { dragMoved = false; return }
+  if (card.favorite) void expandFavorites(card.item)
+  // 汽水的「我喜欢的音乐」是账号歌单：先展示本机收藏，再后台补全账号列表
+  else if (card.liked) void expandFavorites(card.item)
   else void expand(card.item)
 }
 
@@ -891,36 +860,28 @@ function cardStyle(card: WallCard) {
   }
 }
 
-function skeletonStyle(cell: { x: number; y: number }) {
-  const size = isSquareWall.value ? WALL_GAP + 1 : WALL_COVER
-  return {
-    left: `calc(50% + ${cell.x}px)`,
-    top: `calc(50% + ${cell.y}px)`,
-    width: `${size}px`,
-    height: `${size}px`
-  }
-}
-
 /* ============ 网格线 ============ */
 // 线条落在格子边界（间距的一半）上，与卡片同心，不会压到封面。
-const MAP_LINES = (() => {
+const MAP_LINES = computed(() => {
+  const width = galaxyW.value
+  const height = galaxyH.value
   const vertical: number[] = []
   const horizontal: number[] = []
-  for (let x = WALL_GAP / 2; x <= GALAXY_W / 2; x += WALL_GAP) vertical.push(x, -x)
-  for (let y = WALL_GAP / 2; y <= GALAXY_H / 2; y += WALL_GAP) horizontal.push(y, -y)
+  for (let x = WALL_GAP / 2; x <= width / 2; x += WALL_GAP) vertical.push(x, -x)
+  for (let y = WALL_GAP / 2; y <= height / 2; y += WALL_GAP) horizontal.push(y, -y)
   return [
     ...vertical.map(x => ({
       key: `v${x}`,
-      x1: x + GALAXY_W / 2, y1: 0,
-      x2: x + GALAXY_W / 2, y2: GALAXY_H
+      x1: x + width / 2, y1: 0,
+      x2: x + width / 2, y2: height
     })),
     ...horizontal.map(y => ({
       key: `h${y}`,
-      x1: 0, y1: y + GALAXY_H / 2,
-      x2: GALAXY_W, y2: y + GALAXY_H / 2
+      x1: 0, y1: y + height / 2,
+      x2: width, y2: y + height / 2
     }))
   ]
-})()
+})
 // 未连接时即使本地还留着收藏缓存，画布也算空：只展示连接引导。
 const isEmpty = computed(() => !wallCards.value.length)
 
@@ -961,17 +922,19 @@ async function expand(item: ExplorePlaylist) {
   }
   active.value = { id: item.id, name: item.name, cover: item.cover, kind: 'playlist' }
   resetTrack()
+  likedServerTracks.value = []
   activeTracks.value = []
   trackError.value = ''
   loadingTracks.value = true
-  emit('collection-open', item.name)
+  emit('collection-open', item.name, 'playlist')
   await nextTick()
   if (token !== openToken) return
   void paintFromCover(item.cover)
   try {
+    // 最新专辑也挂在探索墙上，展开时要用 album 接口，否则会拿专辑 id 去查歌单
     const result = props.platformKey === 'soda'
       ? await window.api.sodaPlaylist(item.id)
-      : await window.api.neteaseCollection('playlist', item.id)
+      : await window.api.neteaseCollection(item.kind === 'album' ? 'album' : 'playlist', item.id)
     if (token !== openToken) return
     if (!result.success) throw new Error(result.error || '暂时无法打开这份歌单')
     activeTracks.value = result.data as MusicInfo[]
@@ -991,7 +954,7 @@ async function expand(item: ExplorePlaylist) {
   animating = false
 }
 
-async function expandFavorites() {
+async function expandFavorites(account?: ExplorePlaylist) {
   if (animating || active.value) return
   const token = ++openToken
   animating = true
@@ -1001,18 +964,61 @@ async function expandFavorites() {
     await gsap.to(field, { autoAlpha: 0, duration: 0.26, ease: 'power2.in' })
     if (token !== openToken) return
   }
-  active.value = { id: 'favorites', name: '我喜欢的音乐', cover: likedCover.value, kind: 'favorites' }
+  // 封面跟列表第一首走；本机收藏还没同步时先借账号歌单自己的封面，不能落到空心占位
+  const cover = likedCover.value || account?.cover || ''
+  active.value = { id: account?.id || 'favorites', name: '我喜欢的音乐', cover, kind: 'favorites' }
   resetTrack()
+  likedServerTracks.value = []
   activeTracks.value = [...props.favorites]
   trackError.value = ''
   loadingTracks.value = true
-  emit('collection-open', active.value.name)
+  emit('collection-open', active.value.name, 'favorites')
   await nextTick()
   if (token !== openToken) return
-  void paintFromCover(likedCover.value)
-  loadingTracks.value = false
+  void paintFromCover(cover)
+  syncFavoritesCover()
+  // 本机收藏已经能立刻显示，账号歌单只是后台补全，不挡打开动画
+  if (!account || props.favorites.length) loadingTracks.value = false
   animating = false
+  if (account) void syncLikedAccount(account, token)
+  emit('refresh-favorites')
 }
+
+// 左栏封面始终跟随列表第一首：收藏增删会动态刷新列表，封面和配色要一起换
+function syncFavoritesCover() {
+  if (active.value?.kind !== 'favorites') return
+  const cover = activeTracks.value[0]?.img
+  if (!cover || cover === active.value.cover) return
+  active.value = { ...active.value, cover }
+  void paintFromCover(cover)
+}
+
+// 账号歌单读取失败不打断已打开的列表：本机收藏仍可播放，登录过期照旧交给父组件处理
+async function syncLikedAccount(account: ExplorePlaylist, token: number) {
+  try {
+    const result = props.platformKey === 'soda'
+      ? await window.api.sodaPlaylist(account.id)
+      : await window.api.neteaseCollection('playlist', account.id)
+    if (token !== openToken || active.value?.kind !== 'favorites') return
+    if (!result.success) throw new Error(result.error || '暂时无法刷新我喜欢的音乐')
+    likedServerTracks.value = result.data as MusicInfo[]
+    activeTracks.value = mergeLikedTracks(props.favorites, likedServerTracks.value)
+    syncFavoritesCover()
+  } catch (error: any) {
+    if (token !== openToken) return
+    const message = String(error?.message || '')
+    if (/登录已失效|请先连接|请先登录/.test(message)) emit('auth-error', message)
+  } finally {
+    if (token === openToken) loadingTracks.value = false
+  }
+}
+
+// 后台刷新收藏后，已经打开的喜欢页立即跟着换列表（新点亮的最前面）
+watch(() => props.favorites, list => {
+  if (active.value?.kind !== 'favorites') return
+  activeTracks.value = mergeLikedTracks(list, likedServerTracks.value)
+  syncFavoritesCover()
+})
 
 function collapse(reveal = true) {
   if (!active.value) {
@@ -1033,6 +1039,7 @@ function collapse(reveal = true) {
   animating = false
   active.value = null
   activeTracks.value = []
+  likedServerTracks.value = []
   trackError.value = ''
   loadingTracks.value = false
   localPalette.value = null
@@ -1055,23 +1062,34 @@ function playGalaxyIn() {
   })
 }
 
-/* ============ 定位回中心 ============ */
-// 喜欢节点固定在画布原点，归位即回到屏幕中心
+/* ============ 定位回中心（就近原则） ============ */
+// 喜欢卡在画布里有固定坐标，画布按整数倍环回，所以屏幕上存在多份副本。
+// 归位时从当前位置挑最近的那份，只走最短的一段，而不是一律回到原点穿过整面墙。
 function focusFavorites() {
   if (!isWall.value) setLayout('grid')
   if (active.value || animating) collapse()
   const track = trackEl.value
   if (!track) return
   gsap.killTweensOf(track)
+  recenterTween = null
   const x = Number(gsap.getProperty(track, 'x')) || 0
   const y = Number(gsap.getProperty(track, 'y')) || 0
   dragged.value = false
-  if (!x && !y) {
+  // 喜欢卡在格阵里的落点：行列都是奇数时才正好是原点
+  const anchor = wallCards.value.find(card => card.favorite || card.liked) || wallCards.value[0]
+  const anchorX = anchor?.x || 0
+  const anchorY = anchor?.y || 0
+  // 目标位移与当前位移同余（相差整数个画布周期），取距离最近的那个等效落点
+  const targetX = Math.round((x + anchorX) / galaxyW.value) * galaxyW.value - anchorX
+  const targetY = Math.round((y + anchorY) / galaxyH.value) * galaxyH.value - anchorY
+  const dx = targetX - x
+  const dy = targetY - y
+  if (Math.abs(dx) < 1 && Math.abs(dy) < 1) {
     syncTiles()
     return
   }
   if (reduceMotion) {
-    gsap.set(track, { x: 0, y: 0 })
+    gsap.set(track, { x: targetX, y: targetY })
     syncTiles()
     draggables.forEach(handle => handle.update())
     applyFlow()
@@ -1079,9 +1097,10 @@ function focusFavorites() {
   }
   draggables.forEach(handle => handle.disable())
   recenterTween = gsap.to(track, {
-    x: 0,
-    y: 0,
-    duration: 0.75,
+    x: targetX,
+    y: targetY,
+    // 走多少时间按距离给：只挪半格时不该和跨整面墙一样慢
+    duration: gsap.utils.clamp(0.32, 0.7, Math.hypot(dx, dy) / 1200),
     ease: 'power3.inOut',
     onUpdate: syncTiles,
     onComplete() {
@@ -1094,7 +1113,14 @@ function focusFavorites() {
 }
 
 function playFromCollection(track: MusicInfo, index: number) {
-  emit('play-track', track, [...activeTracks.value], index)
+  emit('play-track', track, [...activeTracks.value], index, active.value?.id || '')
+}
+
+// 这张歌单里正在播放：封面中央挂跳动均衡器
+function isPlayingCard(card: { item?: ExplorePlaylist }) {
+  if (!props.playingCollectionId || !card.item?.id) return false
+  // 网易云接口部分链路返回的 id 是 number，播放来源是 string，统一转换后再比
+  return String(card.item.id) === String(props.playingCollectionId)
 }
 
 /* ============ 拖拽与缩放 ============ */
@@ -1104,7 +1130,7 @@ function playFromCollection(track: MusicInfo, index: number) {
 function updateScale() {
   const view = viewportEl.value?.getBoundingClientRect()
   if (!view) return
-  const raw = Math.max(view.width / GALAXY_W, view.height / GALAXY_H)
+  const raw = Math.max(view.width / galaxyW.value, view.height / galaxyH.value)
   galaxyScale.value = Math.min(1.6, Math.max(1, raw))
 }
 
@@ -1124,7 +1150,7 @@ function handleResize() {
 }
 
 function applyFlow() {
-  // 空画布没有行云/斜列内容，直接拖格阵底图（幽灵封面），避免整屏静止
+  // 空画布没有行云/斜列内容，直接拖格阵底图，避免整屏静止
   const canDragGrid = !active.value && (isWall.value || !wallCards.value.length) && flowOn.value
   draggables.forEach(handle => {
     if (canDragGrid) handle.enable()
@@ -1179,8 +1205,8 @@ function setupDraggable() {
     activeCursor: 'grabbing',
     allowNativeTouchScrolling: false,
     dragClickables: true,
-    onPress() { dragged.value = true; hideCardLabel() },
-    onDrag: syncTiles,
+    onPress() { dragMoved = false; dragged.value = true; hideCardLabel() },
+    onDrag() { dragMoved = true; syncTiles() },
     onThrowUpdate: syncTiles,
     onDragEnd: syncTiles,
     onThrowComplete: syncTiles
@@ -1202,20 +1228,42 @@ function driftLocalShift(x: number, y: number) {
   }
 }
 
+// 每行的纵向错位直接写 DOM：拖动时每帧调 gsap.set，和格阵的 3×3 环回同一套思路，
+// 上百张封面不会跟着重渲染。
+let driftRowNodes: HTMLElement[] = []
+function refreshDriftRowNodes() {
+  driftRowNodes = driftPlaneEl.value
+    ? Array.from(driftPlaneEl.value.querySelectorAll<HTMLElement>('.drift-row'))
+    : []
+}
+
+function syncDriftRows() {
+  const rows = driftRows.value
+  if (driftRowNodes.length !== rows.length) refreshDriftRowNodes()
+  const { period } = driftGeometry.value
+  rows.forEach((row, index) => {
+    const node = driftRowNodes[index]
+    if (!node) return
+    node.style.transform = `translateY(${wrapSigned(row.baseY + driftDragY, period)}px)`
+  })
+}
+
 function syncDrift() {
   if (!driftDraggable) return
   const { groupWidth } = driftGeometry.value
   const local = driftLocalShift(driftDraggable.x, driftDraggable.y)
   const shift = wrapSigned(local.x, groupWidth)
   driftPlaneEl.value?.style.setProperty('--drift-shift', `${shift}px`)
-  driftDragY.value = local.y
+  driftDragY = local.y
+  syncDriftRows()
 }
 
 function setupDriftDraggable() {
   driftDraggable?.kill()
   driftDraggable = null
   driftDragging.value = false
-  driftDragY.value = 0
+  driftDragY = 0
+  driftRowNodes = []
   const target = driftProxyEl.value
   const plane = driftPlaneEl.value
   if (!target || !plane) {
@@ -1224,6 +1272,8 @@ function setupDriftDraggable() {
   }
   gsap.set(target, { x: 0, y: 0 })
   plane.style.setProperty('--drift-shift', '0px')
+  // 排布切换 / 尺寸变化后按新的行数重新取节点，并把归零后的位置写回去
+  syncDriftRows()
   driftDraggable = Draggable.create(target, {
     // 用固定的画布做触发区，画面被拖走后仍可从原位置继续抓住
     trigger: plane,
@@ -1234,11 +1284,12 @@ function setupDriftDraggable() {
     allowNativeTouchScrolling: false,
     dragClickables: true,
     onPress() {
+      dragMoved = false
       driftDragging.value = true
       dragged.value = true
       hideCardLabel()
     },
-    onDrag: syncDrift,
+    onDrag() { dragMoved = true; syncDrift() },
     onThrowUpdate: syncDrift,
     onRelease() { driftDragging.value = false },
     onDragEnd() { driftDragging.value = false },
@@ -1276,6 +1327,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   openToken++
+  window.clearTimeout(coverReadyTimer)
   window.removeEventListener('resize', handleResize)
   viewportObserver?.disconnect()
   viewportObserver = null
@@ -1497,173 +1549,47 @@ defineExpose({
   pointer-events: none;
 }
 
-/* ---- 幽灵封面：空画布外圈的空唱片套 ---- */
-.ghost-wall {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.ghost-sleeve {
-  position: absolute;
-  translate: -50% -50%;
-  display: grid;
-  place-items: center;
-  width: 140px;
-  height: 140px;
-  border-radius: 50%;
-  border: 1px solid rgba(112, 96, 170, 0.38);
-  background: linear-gradient(160deg, rgba(255, 255, 255, 0.62), rgba(141, 134, 242, 0.16));
-  box-shadow:
-    0 12px 30px rgba(70, 55, 110, 0.08),
-    inset 0 1px 0 rgba(255, 255, 255, 0.64);
-  color: rgba(90, 80, 140, 0.55);
-}
-.ghost-sleeve.blank {
-  border-style: dashed;
-  border-color: rgba(112, 96, 170, 0.3);
-  background: rgba(255, 255, 255, 0.38);
-  box-shadow: none;
-}
-/* 方形空画布：幽灵套同样铺满整格，不加任何缝 */
-.square-wall .ghost-sleeve {
-  /* 幽灵套是半透明的，用正好一格而不是 181px 叠压，避免接缝处颜色加深 */
-  width: 180px;
-  height: 180px;
-  border: 0;
-  border-radius: 0;
-  background: linear-gradient(160deg, rgba(255, 255, 255, 0.58), rgba(141, 134, 242, 0.2));
-  box-shadow: none;
-  color: rgba(90, 80, 140, 0.45);
-}
-.square-wall .ghost-sleeve:nth-child(3n) { background: linear-gradient(200deg, rgba(255, 255, 255, 0.62), rgba(141, 134, 242, 0.24)); }
-.square-wall .ghost-sleeve:nth-child(4n + 1) { background: linear-gradient(140deg, rgba(255, 255, 255, 0.5), rgba(141, 134, 242, 0.14)); }
-.square-wall .ghost-sleeve.blank {
-  border: 0;
-  background: linear-gradient(160deg, rgba(255, 255, 255, 0.46), rgba(141, 134, 242, 0.1));
-}
-.ghost-wall.breathing .ghost-sleeve {
-  animation: ghost-breathe 3.6s ease-in-out infinite;
-}
-@keyframes ghost-breathe {
-  0%, 100% { opacity: 0.48; transform: translateY(0); }
-  50% { opacity: 0.9; transform: translateY(-4px); }
-}
-/* 方形是整面铺满的，不能上下浮动，否则会露出缝；只做明暗呼吸 */
-.square-wall .ghost-wall.breathing .ghost-sleeve {
-  animation-name: ghost-glow;
-}
-@keyframes ghost-glow {
-  0%, 100% { opacity: 0.48; }
-  50% { opacity: 0.9; }
-}
-
-/* ---- 载入：整面骨架格盖住画布，等真实封面全部解码后再揭开 ---- */
-.skeleton-wall {
-  position: absolute;
-  inset: 0;
-  z-index: 15;
-  overflow: hidden;
-  background:
-    radial-gradient(58% 48% at 50% 42%, color-mix(in srgb, var(--ex-accent) 10%, transparent), transparent 74%),
-    linear-gradient(178deg, #fcfaff 0%, #f4f0fb 58%, #ece7f6 100%);
-  cursor: default;
-}
-/* 单条高光扫过整面墙，比为每张骨架各跑一条动画省得多 */
-.skeleton-wall::after {
-  content: '';
-  position: absolute;
-  inset: -20% -45%;
-  z-index: 2;
-  background: linear-gradient(105deg, transparent 42%, rgba(255, 255, 255, 0.46) 50%, transparent 58%);
-  transform: translateX(-55%);
-  animation: skeleton-sweep 2.3s ease-in-out infinite;
-  pointer-events: none;
-}
-.skeleton-field {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  transform-origin: 50% 50%;
-}
-/* 每块骨架 tile 与真实画布同尺寸、同平铺间距，窗口再宽也不会只铺中间一块 */
-.skeleton-tile-layer {
+/* ---- 正在播放：封面正中 6 根跳动白条，与歌单详情页同一套信号 ---- */
+.card-eq {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 1260px;
-  height: 900px;
-  margin-left: -630px;
-  margin-top: -450px;
-}
-.skeleton-tile {
-  position: absolute;
-  translate: -50% -50%;
-  border-radius: 50%;
-  background: linear-gradient(145deg, rgba(116, 100, 150, 0.14), rgba(116, 100, 150, 0.06));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
-}
-.skeleton-tile.square {
-  border-radius: 0;
-  background: linear-gradient(145deg, rgba(116, 100, 150, 0.1), rgba(116, 100, 150, 0.05));
-  box-shadow: none;
-}
-/* 方形无缝铺满时用淡淡的棋盘差区分格子 */
-.skeleton-tile.square:nth-child(even) {
-  background: linear-gradient(145deg, rgba(116, 100, 150, 0.07), rgba(116, 100, 150, 0.03));
-}
-.skeleton-status {
-  position: absolute;
-  left: 50%;
-  bottom: 22px;
-  z-index: 3;
+  transform: translate(-50%, -50%);
+  z-index: 4;
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 15px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.68);
-  border: 1px solid rgba(255, 255, 255, 0.82);
-  box-shadow: 0 10px 26px rgba(70, 55, 110, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.7);
-  backdrop-filter: blur(18px) saturate(1.3);
-  -webkit-backdrop-filter: blur(18px) saturate(1.3);
-  translate: -50% 0;
+  align-items: flex-end;
+  gap: 5px;
+  height: 48px;
+  filter: drop-shadow(0 2px 8px rgba(6, 4, 12, 0.55));
+  pointer-events: none;
 }
-.skeleton-dot {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ex-accent);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ex-accent) 14%, transparent);
-  animation: skeleton-dot 1.8s ease-in-out infinite;
+.card-eq i {
+  display: block;
+  width: 7px;
+  height: 100%;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.75);
+  transform-origin: bottom;
+  animation: card-eq-bounce 0.86s ease-in-out infinite;
 }
-.skeleton-copy {
-  display: grid;
-  gap: 1px;
+.card-eq i:nth-child(1) { animation-delay: -0.52s; }
+.card-eq i:nth-child(2) { animation-delay: -0.26s; }
+.card-eq i:nth-child(3) { animation-delay: -0.72s; }
+.card-eq i:nth-child(4) { animation-delay: -0.08s; }
+.card-eq i:nth-child(5) { animation-delay: -0.62s; }
+.card-eq i:nth-child(6) { animation-delay: -0.38s; }
+@keyframes card-eq-bounce {
+  0%, 100% { transform: scaleY(0.24); }
+  50% { transform: scaleY(1); }
 }
-.skeleton-kicker {
-  color: var(--ex-accent);
-  font-size: 8px;
-  letter-spacing: 0.22em;
-}
-.skeleton-copy strong {
-  color: var(--text-primary);
-  font: 600 12px/1.35 var(--font-body);
-  letter-spacing: 0.04em;
-}
-.skeleton-copy small {
-  color: var(--text-ghost);
-  font-size: 10px;
-  letter-spacing: 0.03em;
-}
-@keyframes skeleton-sweep {
-  0% { transform: translateX(-55%); }
-  100% { transform: translateX(55%); }
-}
-@keyframes skeleton-dot {
-  0%, 100% { opacity: 0.55; transform: scale(0.9); }
-  50% { opacity: 1; transform: scale(1); }
-}
+/* 斜列排布下画布整体旋转，均衡器跟封面一起转回正 */
+.drift-plane.tilted-left .card-eq { transform: translate(-50%, -50%) rotate(45deg); }
+.drift-plane.tilted-right .card-eq { transform: translate(-50%, -50%) rotate(-45deg); }
+
+/* ---- 载入：整面骨架格盖住画布，等真实封面全部解码后再揭开（复用 WallSkeleton 组件） ---- */
+.explore-skeleton { z-index: 15; cursor: default; }
+
 /* 骨架进入必须瞬时不透明：淡入的那几帧旧封面会从底下漏出来 */
 .loading-fade-leave-active { transition: opacity 0.42s ease; }
 .loading-fade-leave-to { opacity: 0; }
@@ -1795,11 +1721,6 @@ defineExpose({
 }
 .empty-cta:active { filter: brightness(0.97); transform: translateY(0); }
 @media (prefers-reduced-motion: reduce) {
-  .skeleton-wall::after,
-  .skeleton-dot { animation: none; }
-  .skeleton-wall::after { opacity: 0; }
-  .ghost-wall.breathing .ghost-sleeve,
-  .square-wall .ghost-wall.breathing .ghost-sleeve,
   .void-orbit,
   .void-orbit-item img { animation: none; }
 }
@@ -1855,7 +1776,8 @@ defineExpose({
 .drift-row {
   position: absolute;
   left: 0;
-  top: 50%;
+  /* 居中偏移放进静态定位：行内 transform 只留拖动位移，逐帧写 DOM 时不用再拼 calc */
+  top: calc(50% - var(--drift-row) / 2);
   width: 100%;
   height: var(--drift-row);
   overflow: hidden;
@@ -1928,6 +1850,7 @@ defineExpose({
 @media (prefers-reduced-motion: reduce) {
   .drift-plane { animation: none; }
   .drift-track { animation: none; }
+  .card-eq i { animation: none; }
 }
 
 /* ---- 排布切换 ---- */

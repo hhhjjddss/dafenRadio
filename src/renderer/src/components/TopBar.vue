@@ -73,7 +73,7 @@
         </button>
         <!-- 资料同步完成（有昵称）后再展示会员/等级，避免未同步时误标成「VIP · 无等级」 -->
         <div v-if="account.name" class="account-meta">
-          <span v-if="account.vip" class="vip-badge" :class="account.vip">
+          <span v-if="account.vip" class="vip-badge" :class="[account.vip, { soda: activePlatform === 'soda' }]">
             {{ account.vip === 'svip' ? 'SVIP' : 'VIP' }}
           </span>
           <span v-if="account.level" class="level-badge">Lv{{ account.level }}</span>
@@ -338,6 +338,17 @@ const navItems = [
   background: linear-gradient(135deg, #46335f, #7c5fa8);
   color: #ffe9b5;
   box-shadow: inset 0 0 0 1px rgba(255, 226, 166, 0.35);
+}
+/* 汽水官方会员标：深绿胶囊 + 荧光绿斜体字 */
+.vip-badge.soda,
+.vip-badge.soda.svip {
+  border-radius: 999px;
+  background: linear-gradient(180deg, #02803f, #187f4c 58%, #3d9e6f);
+  color: #51f53c;
+  font-weight: 700;
+  
+  letter-spacing: 0.04em;
+  box-shadow: none;
 }
 .level-badge {
   padding: 1px 6px;

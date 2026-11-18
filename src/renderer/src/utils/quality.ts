@@ -33,10 +33,10 @@ export const NETEASE_QUALITY_OPTIONS: QualityOption<NeteaseQuality>[] = [
   { value: 'standard', label: '标准', hint: '128kbps', icon: 'std' }
 ]
 
-// 只列汽水 H5 实际下发的两档 AAC；全景声 / 录音室 / 无损是 App 内的处理效果，接口拿不到
+// 车机协议只下发未加密的标准 / 高音质两档；全景声 / 录音室 / 无损在接口里是加密条目
 export const SODA_QUALITY_OPTIONS: QualityOption<SodaQuality>[] = [
-  { value: 'highest', label: '极高音质', hint: 'AAC 约 256kbps' },
-  { value: 'higher', label: '标准音质', hint: 'AAC 约 128kbps' }
+  { value: 'highest', label: '极高音质', hint: 'AAC 约 256kbps', icon: 'hq' },
+  { value: 'higher', label: '标准音质', hint: 'AAC 约 128kbps', icon: 'std' }
 ]
 
 export const NETEASE_QUALITY_STORAGE = 'dafen:quality-netease'

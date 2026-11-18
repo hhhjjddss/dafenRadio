@@ -15,7 +15,7 @@
           <img class="hero-watermark" :src="brandLogo" alt="" aria-hidden="true" />
           <span class="login-aurora" aria-hidden="true"></span>
           <div class="login-copy">
-            <span class="step-label mono">{{ syncing ? 'SYNCING' : loggedIn ? 'CONNECTED' : expired ? 'SESSION EXPIRED' : error ? 'TRY AGAIN' : scanned ? 'CONFIRM ON PHONE' : qrImage ? 'SCAN TO SIGN IN' : 'SECURE SIGN IN' }}</span>
+           
             <h3>{{ syncing ? '正在同步音乐空间' : loggedIn ? '账号已就绪' : expired ? '登录状态已过期' : error ? '二维码暂时不可用' : scanned ? '请在手机上确认登录' : qrImage ? scanTitle : `登录${brandName}` }}</h3>
             <p>{{ syncing ? '登录成功，正在整理你的歌单与收藏…' : loggedIn ? '登录凭据已安全保存在这台设备，失效时会明确提示重新登录。' : expired ? '保存的登录凭据已失效，重新扫码即可恢复歌单与收藏。' : error ? errorHint : scanned ? (loginMessage || '已扫码，请在手机上确认登录') : qrImage ? (loginMessage || scanHint) : idleHint }}</p>
             <p v-if="error" class="login-error" role="alert"><AlertCircle :size="13" /><span>{{ error }}</span></p>
@@ -106,12 +106,12 @@ const emit = defineEmits<{ close: []; 'logged-out': [platform: 'netease' | 'soda
 const isSoda = computed(() => props.platform === 'soda')
 const brandName = computed(() => isSoda.value ? '汽水音乐' : '网易云音乐')
 const brandLogo = computed(() => isSoda.value ? sodaLogo : neteaseLogo)
-const scanTitle = computed(() => isSoda.value ? '用汽水音乐 App 扫码' : '用网易云音乐 App 扫码')
+const scanTitle = computed(() => isSoda.value ? '用汽水音乐App 扫码授权' : '用网易云音乐 App 扫码')
 const scanHint = computed(() => isSoda.value
-  ? '在汽水音乐 App 里扫一扫并确认，登录凭据会加密保存。'
+  ? '汽水音乐通过抖音账号授权登录，请用抖音 App 扫码并确认，登录凭据会加密保存。'
   : '二维码仅用于本机登录确认，登录凭据会加密保存。')
 const idleHint = computed(() => isSoda.value
-  ? '登录后同步你在汽水的歌单与收藏；不登录也可以浏览推荐与试听。'
+  ? '登录后可同步你在汽水的歌单、收藏与会员音质；不登录也可以浏览推荐与试听。'
   : '登录后同步歌单、收藏与每日推荐；不登录也可以直接搜索试听。')
 const loggedIn = ref(false)
 const expired = ref(false)
@@ -276,14 +276,17 @@ async function logout() {
 
 onMounted(async () => {
   // 轮询在主进程，浮层只负责展示状态：关掉浮层也不会丢掉手机上的确认
+  // 校验请求发出后如果已经收到主进程推送的成功状态，不要再用这次旧校验结果覆盖
+  let pushedSuccess = false
   const stateListener = isSoda.value ? window.api.onSodaLoginState : window.api.onNeteaseLoginState
   offLoginState = stateListener?.((state: any) => {
+    if (state?.phase === 'success') pushedSuccess = true
     if (!disposed) applyLoginState(state)
   }) ?? null
   try {
     // 校验真实登录态：凭据过期时明确显示「登录已过期」，而不是笼统的未连接
     const result = isSoda.value ? await window.api.sodaSessionInfo() : await window.api.neteaseSessionInfo()
-    if (disposed) return
+    if (disposed || pushedSuccess) return
     loggedIn.value = Boolean(result?.data?.connected)
     expired.value = Boolean(result?.data?.expired)
     // 弹层先发现了过期也要回传给主界面，否则背后的账号资料还显示为已连接

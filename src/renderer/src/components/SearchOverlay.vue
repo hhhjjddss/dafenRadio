@@ -1,7 +1,7 @@
 <template>
   <transition name="search-fade">
     <div v-if="open" class="search-overlay" @click.self="emit('close')">
-      <section class="search-dialog" :class="{ filled: searchFilled }" role="dialog" aria-modal="true" aria-label="搜索音乐">
+      <section ref="dialogEl" class="search-dialog" :class="{ filled: searchFilled }" role="dialog" aria-modal="true" aria-label="搜索音乐" @keydown="onDialogKeydown">
         <div class="search-dialog-field">
           <Search :size="18" class="sd-icon" />
           <input
@@ -76,7 +76,7 @@
                   <span class="sd-title">
                     <strong>{{ track.name }}</strong>
                     <i v-if="track.unavailable" class="offline-tag">版权受限</i>
-                    <i v-else-if="track.vip" class="vip-tag" :class="track.vip">{{ track.vip === 'paid' ? '付费' : 'VIP' }}</i>
+                    <i v-else-if="track.vip" class="vip-tag" :class="[track.vip, { soda: track.platform === 'soda' && track.vip === 'vip' }]">{{ track.vip === 'paid' ? '付费' : 'VIP' }}</i>
                   </span>
                   <small>{{ track.singer }}<template v-if="track.album"> · {{ track.album }}</template></small>
                 </span>
@@ -130,6 +130,26 @@ const draft = computed({
 const searchFilled = computed(() => props.busy || props.searched)
 const searchListEl = ref<HTMLElement | null>(null)
 const searchInput = ref<HTMLInputElement | null>(null)
+const dialogEl = ref<HTMLElement | null>(null)
+
+// 焦点陷阱：Tab 只在浮层内循环，不会跑到背后的播放条与画布上
+function onDialogKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Tab') return
+  const root = dialogEl.value
+  if (!root) return
+  const items = Array.from(root.querySelectorAll<HTMLElement>('input, button, [href], [tabindex]:not([tabindex="-1"])'))
+    .filter(el => !el.hasAttribute('disabled'))
+  if (!items.length) return
+  const first = items[0]
+  const last = items[items.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
 
 watch(() => props.open, async (open) => {
   if (!open) return
@@ -366,6 +386,16 @@ function formatTime(seconds: number) {
 }
 .vip-tag.vip { color: #a9770c; border: 1px solid rgba(169, 119, 12, 0.35); background: rgba(212, 168, 83, 0.14); }
 .vip-tag.paid { color: var(--copper); border: 1px solid rgba(229, 140, 157, 0.4); background: rgba(229, 140, 157, 0.08); }
+/* 汽水列表会员标：借网易云的方角描边样式，配色保留汽水绿 */
+.vip-tag.soda {
+  padding: 0 4px;
+  border: 1px solid rgba(4, 120, 60, 0.55);
+  border-radius: 4px;
+  background: linear-gradient(180deg, #02803f, #187f4c 58%, #3d9e6f);
+  color: #51f53c;
+  font-weight: 700;
+  
+}
 .offline-tag {
   flex: none;
   padding: 0 4px;

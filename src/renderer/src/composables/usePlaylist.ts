@@ -61,23 +61,15 @@ export function usePlaylist() {
     return { track: playQueue[nextIndex], index: nextIndex }
   }
 
-  // 播放下一首
-  const getNextTrack = (playMode: PlayMode): MusicInfo | null => {
-    const next = peekNextTrack(playMode)
-    if (!next) return null
-    currentIndex = next.index
-    return next.track
-  }
-
-  // 播放成功后提交索引（配合 peekNextTrack 使用）
+  // 播放成功后提交索引（配合 peekNextTrack / peekPrevTrack 使用）
   const commitIndex = (index: number) => {
     if (index >= 0 && index < playQueue.length) {
       currentIndex = index
     }
   }
 
-  // 播放上一首
-  const getPrevTrack = (playMode: PlayMode): MusicInfo | null => {
+  // 计算上一首但不提交索引，播放成功后再 commitIndex，避免失败跳号
+  const peekPrevTrack = (playMode: PlayMode): { track: MusicInfo; index: number } | null => {
     if (playQueue.length === 0) return null
 
     let prevIndex = -1
@@ -93,19 +85,17 @@ export function usePlaylist() {
         }
         break
 
-      case 'repeat-all':
-      case 'repeat-one':
-      case 'sequence':
       default:
         prevIndex = currentIndex - 1
         if (prevIndex < 0) {
+          // 顺序播放到第一首就停；列表循环回到末尾
+          if (playMode === 'sequence') return null
           prevIndex = playQueue.length - 1
         }
         break
     }
 
-    currentIndex = prevIndex
-    return playQueue[currentIndex]
+    return { track: playQueue[prevIndex], index: prevIndex }
   }
 //npm.cmd run dev
   return {
@@ -114,7 +104,6 @@ export function usePlaylist() {
     setCurrentIndex,
     commitIndex,
     peekNextTrack,
-    getNextTrack,
-    getPrevTrack
+    peekPrevTrack
   }
 }

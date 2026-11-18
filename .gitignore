@@ -5,6 +5,8 @@ node_modules/
 out/
 dist/
 dafenRadio/
+release/
+.tmp-build/
 *.asar
 
 # 运行时缓存

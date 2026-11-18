@@ -29,11 +29,14 @@
           <circle class="vinyl-hole" cx="24" cy="24" r="1.7" />
         </svg>
         <template v-else>
-          <img class="disc-label" :src="coverUrl" alt="" @error="coverBroken = true" />
+          <img class="disc-label" :src="neteaseThumb(coverUrl, '120y120')" alt="" @error="coverBroken = true" />
           <span class="disc-hole" aria-hidden="true"></span>
         </template>
       </span>
-      <span class="cover-hint">进入播放页</span>
+      <span v-if="loading" class="cover-loading" role="status" aria-label="正在加载">
+        <img :src="logoMark" alt="" />
+      </span>
+      <span v-else class="cover-hint">进入播放页</span>
     </button>
 
     <div class="mini-meta">
@@ -48,7 +51,7 @@
               :style="titleStyle"
             ><span class="title-seg">{{ track?.name || '让音乐开始' }}</span><span v-if="titleScroll !== null" class="title-seg" aria-hidden="true">{{ track?.name || '让音乐开始' }}</span></strong>
           </span>
-          <i v-if="track?.vip" class="vip-tag" :class="track.vip">{{ track.vip === 'paid' ? '付费' : 'VIP' }}</i>
+          <i v-if="track?.vip" class="vip-tag" :class="[track.vip, { soda: track.platform === 'soda' && track.vip === 'vip' }]">{{ track.vip === 'paid' ? '付费' : 'VIP' }}</i>
         </div>
         <small class="mini-artist">{{ track?.singer || '挑一首喜欢的歌' }}</small>
       </div>
@@ -148,11 +151,14 @@ import type { MusicInfo } from '../composables/useNetease'
 import type { PlayMode } from '../composables/usePlayer'
 import { Heart, ListMusic, ListOrdered, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Sparkles, Subtitles, Volume2, VolumeX } from '@lucide/vue'
 import TransportIcon from './TransportIcon.vue'
+import logoMark from '../assets/logo-mark.png'
+import { neteaseThumb } from '../utils/cover'
 
 const props = defineProps<{
   track: MusicInfo | null
   coverUrl: string
   playing: boolean
+  loading: boolean
   currentTime: number
   duration: number
   trialLimit: number
@@ -431,6 +437,30 @@ defineExpose({ enter })
 }
 .mini-cover:hover .cover-hint { opacity: 1; transform: translate(-50%, 0); }
 .mini-cover:hover .cover-disc { box-shadow: 0 0 0 1px var(--amber-border), 0 0 22px var(--accent-live-glow); }
+/* 切歌等待：logo 在封面上上下跳动，替代没有反馈的空白期 */
+.cover-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(16, 12, 24, 0.46);
+  pointer-events: none;
+}
+.cover-loading img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  animation: logo-bounce 0.62s ease-in-out infinite alternate;
+}
+@keyframes logo-bounce {
+  from { transform: translateY(-3px); }
+  to { transform: translateY(3px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cover-loading img { animation: none; }
+}
 
 /* ---- 信息与歌词 ---- */
 /* 左半边放歌名/歌手，右半边原来空着，现在让歌词填满 */
@@ -451,7 +481,7 @@ defineExpose({ enter })
   width: 100%;
   overflow: hidden;
   color: var(--text-primary);
-  font-size: 13.5px;
+  font-size: 14.5px;
   font-weight: 600;
   letter-spacing: 0.01em;
   text-overflow: ellipsis;
@@ -475,7 +505,7 @@ defineExpose({ enter })
 .mini-artist {
   overflow: hidden;
   color: var(--text-warm);
-  font-size: 11.5px;
+  font-size: 12.5px;
   font-weight: 500;
   /* 小字号 + 亚像素字距会让笔画落在半像素上，中文看起来断断续续，这里收紧为 0 */
   letter-spacing: 0;
@@ -491,6 +521,17 @@ defineExpose({ enter })
 }
 .vip-tag.vip { color: #a9770c; border: 1px solid rgba(169, 119, 12, 0.35); background: rgba(212, 168, 83, 0.14); }
 .vip-tag.paid { color: var(--copper); border: 1px solid rgba(185, 98, 120, 0.32); background: rgba(185, 98, 120, 0.1); }
+/* 汽水列表会员标：借网易云的方角描边样式，配色保留汽水绿 */
+.vip-tag.soda {
+  padding: 0 4px;
+  border: 1px solid rgba(4, 120, 60, 0.55);
+  border-radius: 4px;
+  background: linear-gradient(180deg, #02803f, #187f4c 58%, #3d9e6f);
+  color: #51f53c;
+  font-weight: 700;
+   
+  letter-spacing: 0.02em;
+}
 
 .mini-lyric {
   position: relative;
@@ -507,8 +548,8 @@ defineExpose({ enter })
   white-space: nowrap;
 }
 /* 歌词固定深色，不再跟随平台强调色（网易云红 / 汽水绿）变化 */
-.lyric-current { color: var(--text-primary); font-size: 14px; font-weight: 600; line-height: 1.4; letter-spacing: 0; }
-.lyric-next { color: #191722; font-size: 11.5px; line-height: 1.4; letter-spacing: 0; opacity: 0.72; }
+.lyric-current { color: var(--text-primary); font-size: 15px; font-weight: 600; line-height: 1.4; letter-spacing: 0; }
+.lyric-next { color: #191722; font-size: 12.5px; line-height: 1.4; letter-spacing: 0; opacity: 0.72; }
 
 /* ---- 进度与控制 ---- */
 .mini-right { position: relative; z-index: 1; display: grid; gap: 3px; }

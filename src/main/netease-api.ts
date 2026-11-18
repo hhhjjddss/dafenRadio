@@ -836,12 +836,20 @@ export async function getNeteaseLikedSongs() {
   if (!liked?.id) return []
   const songs: any[] = []
   const pageSize = 200
-  while (true) {
-    const { body } = await requestApi(`/playlist/track/all?id=${encodeURIComponent(liked.id)}&limit=${pageSize}&offset=${songs.length}`, sessionCookie)
-    const page = Array.isArray(body?.songs) ? body.songs : []
+  const maxPages = 80
+  const seen = new Set<string>()
+  // 服务端若忽略 offset 或持续返回满页，没有上限会无限请求并不断累积内存
+  for (let page = 0; page < maxPages; page += 1) {
+    const { body } = await requestApi(`/playlist/track/all?id=${encodeURIComponent(liked.id)}&limit=${pageSize}&offset=${page * pageSize}`, sessionCookie)
+    const list = Array.isArray(body?.songs) ? body.songs : []
     const privileges = privilegeMap(body)
-    songs.push(...page.map((song: any) => mapSong(song, privileges.get(String(song.id)))))
-    if (page.length < pageSize) break
+    for (const song of list) {
+      const mapped = mapSong(song, privileges.get(String(song.id)))
+      if (!mapped?.songmid || seen.has(mapped.songmid)) continue
+      seen.add(mapped.songmid)
+      songs.push(mapped)
+    }
+    if (list.length < pageSize) break
   }
   return songs.filter((song: any) => song.songmid && song.name)
 }
